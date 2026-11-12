@@ -46,3 +46,5 @@ pids/
 artifacts/
 .vercel
 perihelion-demo.mp4
+submission/*.mp4
+submission/*.webm
