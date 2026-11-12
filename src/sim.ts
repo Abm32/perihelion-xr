@@ -10,6 +10,8 @@ export interface Body {
   /** Gravitational parameter (G * mass), m^3/s^2. */
   gm: number;
   hue: number;
+  /** A real object found on the player's desk, not a generated body. */
+  real?: boolean;
 }
 
 export interface Level {
@@ -272,4 +274,88 @@ export function clearLevel(save: Save): Save {
     next.log = [...save.log, save.nudged ? 1 : 2].slice(-30);
   }
   return next;
+}
+
+// ---- real desk objects ------------------------------------------------------
+
+/** One downward depth probe: board-space position and height above the board origin. */
+export interface DeskSample {
+  x: number;
+  z: number;
+  h: number;
+}
+
+export const DESK_STEP = 0.045; // probe grid spacing
+const OBJECT_MIN_H = 0.03; // depth noise at arm's length is about a centimeter
+const OBJECT_LONE_H = 0.06; // a single probe must be this tall to count alone
+
+/** Hex grid of probe points covering the board. */
+export function deskProbePoints(): { x: number; z: number }[] {
+  const pts: { x: number; z: number }[] = [];
+  const rows = Math.ceil(BOARD_R / (DESK_STEP * 0.866));
+  for (let j = -rows; j <= rows; j++) {
+    const z = j * DESK_STEP * 0.866;
+    const shift = j % 2 === 0 ? 0 : DESK_STEP / 2;
+    for (let i = -rows; i <= rows; i++) {
+      const x = i * DESK_STEP + shift;
+      if (Math.hypot(x, z) <= BOARD_R - 0.02) pts.push({ x, z });
+    }
+  }
+  return pts;
+}
+
+/**
+ * Height of the flat surface under the board, or null when the probes do not
+ * agree on one (board floating in the air, clutter everywhere, too few hits).
+ * Only probes within 35 cm of the board's current height vote: a board that
+ * overhangs the desk edge sends many rays to the floor, and those must not win.
+ */
+export function deskSurface(samples: DeskSample[]): number | null {
+  const hs = samples
+    .map((s) => s.h)
+    .filter((h) => Math.abs(h) < 0.35)
+    .sort((a, b) => a - b);
+  if (hs.length < 12) return null;
+  // Objects only ever stick up, so the surface sits below the median.
+  const base = hs[Math.floor(hs.length * 0.35)];
+  const flat = hs.filter((h) => Math.abs(h - base) < 0.015).length;
+  return flat >= hs.length * 0.5 ? base : null;
+}
+
+/** Group probes that stand clear of the surface into at most three round bodies. */
+export function clusterDesk(samples: DeskSample[], surface: number): Body[] {
+  const tall = samples.filter((s) => s.h - surface > OBJECT_MIN_H && s.h - surface < 0.4);
+  const seen = new Set<DeskSample>();
+  const bodies: (Body & { n: number })[] = [];
+  for (const seed of tall) {
+    if (seen.has(seed)) continue;
+    const group = [seed];
+    seen.add(seed);
+    for (let k = 0; k < group.length; k++) {
+      for (const o of tall) {
+        if (!seen.has(o) && Math.hypot(o.x - group[k].x, o.z - group[k].z) < DESK_STEP * 1.2) {
+          seen.add(o);
+          group.push(o);
+        }
+      }
+    }
+    const top = Math.max(...group.map((g) => g.h - surface));
+    if (group.length < 2 && top < OBJECT_LONE_H) continue; // one low probe is noise
+    const x = group.reduce((a, g) => a + g.x, 0) / group.length;
+    const z = group.reduce((a, g) => a + g.z, 0) / group.length;
+    const reach = Math.max(...group.map((g) => Math.hypot(g.x - x, g.z - z)));
+    bodies.push({
+      x,
+      z,
+      r: Math.min(0.07, reach + DESK_STEP / 2),
+      gm: Math.min(0.012, 0.004 + 0.0015 * group.length), // bigger footprint, more pull
+      hue: 0.1,
+      real: true,
+      n: group.length,
+    });
+  }
+  return bodies
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 3)
+    .map(({ n: _n, ...b }) => b);
 }
