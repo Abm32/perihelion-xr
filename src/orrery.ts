@@ -3,7 +3,6 @@ import {
   BufferAttribute,
   BufferGeometry,
   CanvasTexture,
-  CircleGeometry,
   Color,
   createSystem,
   Entity,
@@ -30,6 +29,7 @@ import {
 } from '@iwsdk/core';
 import { BoardHandle, Comet } from './game-components.js';
 import { resumeAudio, sfx } from './sfx.js';
+import { makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
   BOARD_R,
   clearLevel,
@@ -113,6 +113,10 @@ export class OrrerySystem extends createSystem({
   private hudTexture!: CanvasTexture;
   private glow = glowTexture();
   private unitSphere = new SphereGeometry(1, 32, 16);
+  private grid = makeGravityGrid(BOARD_R + 0.03);
+  private particles = new Particles();
+  private timeUniforms: { value: number }[] = [];
+  private star = { x: 0, z: 0 }; // heaviest body: lights the planets, blows the comet tail
 
   private save: Save = EMPTY_SAVE;
   private level!: Level;
@@ -226,26 +230,21 @@ export class OrrerySystem extends createSystem({
   }
 
   private buildBoard(): void {
-    // Dark disc so glowing bodies read against any real desk in passthrough.
-    const disc = new Mesh(
-      new CircleGeometry(BOARD_R + 0.03, 64),
-      new MeshBasicMaterial({ color: 0x04060c, transparent: true, opacity: 0.6 }),
-    );
-    disc.rotation.x = -Math.PI / 2;
-    disc.position.y = 0.002;
+    // Dark gravity grid: reads against any real desk in passthrough and shows the wells.
+    this.grid.mesh.position.y = PLAY_Y - 0.008;
     const rim = new Mesh(
       new RingGeometry(BOARD_R + 0.026, BOARD_R + 0.03, 96),
       new MeshBasicMaterial({ color: 0x6fb7ff, transparent: true, opacity: 0.8 }),
     );
     rim.rotation.x = -Math.PI / 2;
-    rim.position.y = 0.003;
+    rim.position.y = PLAY_Y - 0.007;
 
     const rnd = mulberry32(7);
-    const stars = new Float32Array(160 * 3);
-    for (let i = 0; i < 160; i++) {
+    const stars = new Float32Array(90 * 3);
+    for (let i = 0; i < 90; i++) {
       const r = Math.sqrt(rnd()) * BOARD_R;
       const th = rnd() * Math.PI * 2;
-      stars.set([Math.cos(th) * r, 0.006 + rnd() * 0.03, Math.sin(th) * r], i * 3);
+      stars.set([Math.cos(th) * r, PLAY_Y + 0.02 + rnd() * 0.09, Math.sin(th) * r], i * 3);
     }
     const starGeo = new BufferGeometry();
     starGeo.setAttribute('position', new BufferAttribute(stars, 3));
@@ -291,8 +290,9 @@ export class OrrerySystem extends createSystem({
     hud.rotation.x = -0.45; // tilt up toward a seated player's eyes
 
     this.root.add(
-      disc,
+      this.grid.mesh,
       rim,
+      this.particles.points,
       starPoints,
       this.levelGroup,
       this.trail,
@@ -304,18 +304,35 @@ export class OrrerySystem extends createSystem({
   }
 
   private loadLevel(): void {
-    for (const child of [...this.levelGroup.children]) {
-      this.levelGroup.remove(child);
-      ((child as Mesh).material as MeshBasicMaterial | undefined)?.dispose?.();
-    }
+    this.levelGroup.traverse((o) => {
+      const m = o as Mesh;
+      (m.material as MeshBasicMaterial | undefined)?.dispose?.();
+      if (m.geometry && m.geometry.type !== 'SphereGeometry') m.geometry.dispose();
+    });
+    this.levelGroup.clear();
+    this.timeUniforms.length = 0;
     this.level = levelFor(this.save.day, this.save.index);
+
+    const bodies = this.level.bodies;
+    const heaviest = bodies.reduce((a, b) => (b.gm > a.gm ? b : a), bodies[0]);
+    this.star = heaviest ? { x: heaviest.x, z: heaviest.z } : { x: 0, z: 0 };
+    const slots = this.grid.uniforms.uBodies.value;
+    slots.forEach((v, i) => (bodies[i] ? v.set(bodies[i].x, bodies[i].z, bodies[i].gm) : v.set(0, 0, 0)));
+    this.grid.uniforms.uRipple.value.z = -1;
     const color = new Color();
-    for (const b of this.level.bodies) {
-      color.setHSL(b.hue, 0.75, 0.6);
-      const body = new Mesh(this.unitSphere, new MeshBasicMaterial({ color }));
+    for (const b of bodies) {
+      let body;
+      if (b === heaviest) {
+        body = makeStar(b.hue);
+        color.setHSL(0.02 + b.hue * 0.12, 1, 0.6);
+        body.add(this.halo(color.getHex(), 6)); // corona: sprite, not bloom
+      } else {
+        const light = new Vector3(heaviest.x - b.x, 0.15, heaviest.z - b.z).normalize();
+        body = makePlanet(b.hue, (b.gm * 1000) % 1, light);
+      }
       body.position.set(b.x, PLAY_Y, b.z);
       body.scale.setScalar(b.r);
-      body.add(this.halo(color.getHex(), 2.5 + b.gm * 250)); // heavier glows wider
+      this.timeUniforms.push(body.userData.uniforms.uTime);
       this.levelGroup.add(body);
     }
     const t = this.level.target;
@@ -329,7 +346,9 @@ export class OrrerySystem extends createSystem({
     );
     pad.rotation.x = -Math.PI / 2;
     pad.position.set(this.level.launcher.x, PLAY_Y, this.level.launcher.z);
-    this.levelGroup.add(this.target, pad);
+    const gate = this.halo(0xffd76b, t.r * 3.2);
+    gate.position.copy(this.target.position);
+    this.levelGroup.add(this.target, pad, gate);
 
     this.trailCount = 0;
     this.trail.geometry.setDrawRange(0, 0);
@@ -448,6 +467,7 @@ export class OrrerySystem extends createSystem({
     this.band.visible = false;
     this.preview.geometry.setDrawRange(0, 0);
     this.shotMesh.visible = true;
+    this.particles.burst(this.shot.x, PLAY_Y, this.shot.z, 14, 0.12, 0.35, 0.6, 0.9, 1);
     sfx.launch(Math.min(1, Math.hypot(px, pz) / MAX_PULL));
     this.say('…');
   }
@@ -458,12 +478,28 @@ export class OrrerySystem extends createSystem({
     this.trailCount++;
   }
 
+  /** Two tails, as on a real comet: dust lags along the path, ions blow straight away from the star. */
+  private emitTail(): void {
+    const { x, z, vx, vz } = this.shot;
+    const ax = x - this.star.x;
+    const az = z - this.star.z;
+    const d = Math.hypot(ax, az) || 1;
+    const j = () => (Math.random() - 0.5) * 0.02;
+    this.particles.emit(x, PLAY_Y, z, -vx * 0.25 + j(), j() * 0.5, -vz * 0.25 + j(), 0.7, 0.006, 1, 0.85, 0.6);
+    // Ion tail brightens near the star, like outgassing near perihelion.
+    const push = Math.min(0.25, 0.012 / d);
+    this.particles.emit(x, PLAY_Y, z, (ax / d) * push + j(), 0, (az / d) * push + j(), 0.5, 0.005, 0.5, 0.8, 1);
+  }
+
   private land(outcome: Outcome): void {
     this.timer = 0;
     this.shotMesh.visible = false;
     // The spent trail stays, dimmed, as a reference for the next attempt.
     (this.trail.material as LineBasicMaterial).opacity = 0.35;
+    const { x, z } = this.shot;
     if (outcome === 'hit') {
+      this.particles.burst(x, PLAY_Y, z, 70, 0.22, 1.1, 1, 0.82, 0.35);
+      this.grid.uniforms.uRipple.value.set(this.level.target.x, this.level.target.z, 0);
       this.phase = 'won';
       const before = this.save;
       this.save = clearLevel(this.save);
@@ -476,8 +512,12 @@ export class OrrerySystem extends createSystem({
       );
     } else {
       this.phase = 'miss';
-      if (outcome === 'crash') sfx.crash();
-      else sfx.lost();
+      if (outcome === 'crash') {
+        this.particles.burst(x, PLAY_Y, z, 45, 0.16, 0.6, 1, 0.5, 0.15);
+        sfx.crash();
+      } else {
+        sfx.lost();
+      }
       this.say(outcome === 'crash' ? 'Burned up. Try again.' : 'Lost to deep space.');
     }
   }
@@ -520,6 +560,10 @@ export class OrrerySystem extends createSystem({
     if (visibility === VisibilityState.VisibleBlurred) return; // system menu open: pause
 
     this.clock += delta;
+    for (const u of this.timeUniforms) u.value = this.clock;
+    const ripple = this.grid.uniforms.uRipple.value;
+    if (ripple.z >= 0) ripple.z = ripple.z > 1.4 ? -1 : ripple.z + delta;
+    this.particles.update(delta);
     if (this.placeIn >= 0) {
       this.placeIn -= delta;
       if (this.placeIn < 0) this.placeInFront();
@@ -559,6 +603,7 @@ export class OrrerySystem extends createSystem({
           this.pushTrail();
         }
         this.shotMesh.position.set(this.shot.x, PLAY_Y, this.shot.z);
+        this.emitTail();
         this.trail.geometry.attributes.position.needsUpdate = true;
         this.trail.geometry.setDrawRange(0, this.trailCount);
         if (outcome !== 'flying') this.land(outcome);
