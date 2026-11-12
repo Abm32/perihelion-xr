@@ -211,3 +211,22 @@ That sequence plants gravity with a pinch, drags it 5 cm, and lets go; the well 
 The scripts under `test/live.*.mjs` cover the rest: `live.hook` (rules), `live.desktop` (pointer play and
 the empty-sky hint), `live.mouse` (real mouse), `live.cinema` (slow motion), `live.desk` and `live.place`
 (desk scan), `live.render` (draw calls).
+
+## Recording the demo video
+
+The video is recorded from the same emulator session used for testing. `test/rec.mjs` saves Chrome's
+screencast frames with their timestamps; `scripts/demo-lib.sh` holds the helpers that pose the emulated
+headset and hand; `scripts/make-demo.py` cuts and captions the result.
+
+| Shot | What is driven | What it shows |
+|---|---|---|
+| `a_level1` | Emulated hand pinches the comet, pulls to the solver's launch, releases | Ghost onboarding, the core gesture, a first-try win |
+| `b_void` | Straight pull (crash), pinch at the helper spot, pull again | The empty sky, planting gravity, the bent preview, the win |
+| `c_cup` | Board re-placed at the emulator table's cup, push-in, one pull | Board landing on the desk, the scan finding the cup, a shot through its gravity |
+| `d_blackhole` | One pull on today's third level | Black hole, orbiting moon, slow motion, "Daily done", streak |
+| `f_flat` | In-page pointer schedule (the mouse code path) on levels 1 and 2 | Play without a headset |
+
+Two practical notes. `browser run` scripts cannot overlap, so anything the game must do while the recorder
+runs is either a CLI `xr` command or scheduled inside the page beforehand (`test/live.place-later.mjs`,
+`test/live.demo-flat.mjs`). And the emulator draws the room and the app on separate canvases at different
+scales, so recording a canvas directly gives a wrong picture; the screencast is the compositor's output.

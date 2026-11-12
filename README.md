@@ -488,6 +488,21 @@ vercel deploy --prod
 
 To test on a headset during development, open the dev server's HTTPS URL in the Quest browser.
 
+## Demo video
+
+`perihelion-demo.mp4` (93 s, 1280x720) is cut from real captures of the running app: four shots in the
+IWSDK emulator (Quest 3 profile, emulated hand) and one in a desktop browser. Nothing in it is generated
+footage. It is not stored in the repository; it is rebuilt with:
+
+```bash
+npx @iwsdk/cli dev up --ai-mode agent --allow-browser-automation --screenshot-width 1280 --screenshot-height 720
+. scripts/demo-lib.sh        # helpers: seat, cam, shoot2, rec ... (the shot list is in docs/PLAYTEST.md)
+python3 scripts/make-demo.py # trims, captions, title cards, synthesized pad -> perihelion-demo.mp4
+```
+
+`test/rec.mjs` records Chrome's screencast (the picture `browser screenshot` takes) with real frame
+timings while the CLI drives the emulated hand.
+
 ## Competition requirements
 
 | Requirement or guideline | How Perihelion meets it |
