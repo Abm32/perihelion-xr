@@ -307,6 +307,13 @@
           faceStream = stream;
           face.srcObject = stream;
           await face.play();
+          // A camera can drop out (sleep, cable, mode change). Say so and try to get a picture back.
+          stream.getVideoTracks()[0].onended = async () => {
+            if (faceStream !== stream) return;
+            $('status').textContent = 'The camera stopped. Reconnecting…';
+            await new Promise((r) => setTimeout(r, 1500));
+            $('status').textContent = await startFace($('camSel').value);
+          };
           return '';
         } catch (error) {
           return `${error.name}: ${error.message}`;
