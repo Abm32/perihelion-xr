@@ -3,6 +3,6 @@
 export default async function run({ frame }) {
   return frame.evaluate(() => {
     const s = window.__perihelion.state();
-    return { phase: s.phase, message: s.message, save: s.save, board: s.board, bodies: s.level.bodies.length };
+    return { phase: s.phase, message: s.message, save: s.save, board: s.board, yaw: s.yaw, comet: s.comet, bodies: s.level.bodies.length };
   });
 }

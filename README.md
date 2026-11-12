@@ -1,45 +1,48 @@
-# IWSDK App
+# Perihelion
 
-This project uses `iwsdk.config.json` for declarative scene, asset, component,
-XR, and emulator configuration. Application systems remain explicit in
-`src/index.ts`.
+**A daily gravity puzzle that lives on your desk.** Pinch the comet, pull back, let go — and bend its path
+around the planets into the ring.
 
-```sh
+Built for the Meta VR Start Developer Competition 2026 (Gaming track, New Experience) with the
+[Immersive Web SDK](https://developers.meta.com/horizon/documentation/iwsdk/guides/overview/).
+
+## How it plays
+
+- **Hands only.** One verb: pinch, pull, release. No controller, no menus, no buttons.
+- **Seated.** The whole board is 54 cm across and sits within arm's reach.
+- **On your real desk.** In passthrough the board snaps onto the nearest horizontal surface at desk height.
+  Pinch the amber puck on the rim to drag it somewhere else.
+- **Three puzzles a day.** Everyone gets the same three skies, easy to hard. Finish them to grow your
+  streak; miss a day and it resets. Encore levels follow for anyone who wants more.
+
+## How it works
+
+| File | What it does |
+|---|---|
+| `src/sim.ts` | Pure game logic: gravity integration at a fixed 120 Hz step, seeded level generator, brute-force solver, streak rules. No Three.js or DOM. |
+| `src/orrery.ts` | The IWSDK system: board, comet (`OneHandGrabbable`), trajectory preview, trail, HUD, desk placement from `XRPlane`. |
+| `src/sfx.ts` | Procedural Web Audio. There are no audio files. |
+| `src/panel.ts` | Browser welcome card with the Enter XR button. |
+
+Every level is solved on a 960-launch grid before it is accepted, and the solver uses the same fixed step
+as the game, so a daily puzzle is never unsolvable. All visuals are generated in code.
+
+## Run it
+
+Needs Node 22.18+ (or 24).
+
+```bash
 npm install
-npm run dev
+npm run dev        # managed browser with the XR emulator
+npm test           # sim self-check: 120 levels solvable, deterministic, streak rules
+npm run typecheck
+npm run build
 ```
 
-Use the Runtime and Editor controls in the managed browser to switch between
-the running experience and its authored scene.
+`test/live.*.mjs` drive the running app through `npx @iwsdk/cli browser run` (start the dev server with
+`--allow-browser-automation`).
 
-## Starter content
+## Status
 
-The robot and welcome panel are small examples of authored scene content plus
-runtime systems. The robot turns toward the player's head and plays a sound
-when pressed. To remove the robot, delete its scene node, its `RobotSystem`
-registration from `src/index.ts` or `src/index.js`, and its `Robot` registration
-from `src/components.ts` or `src/components.js`; you can then delete the unused
-robot component and system files. To remove the welcome panel, delete its scene
-node and its `PanelSystem` registration from the application entry point.
-
-The robot stands on the second of three numbered stations. The first holds dark
-pieces you can grab and move, and the third holds a ring you can spin in place.
-The studio props (the plinths and the dark pieces, plus the floor and stage in VR
-and Desktop 3D) are built in code in `src/scene-assets/studio.scene-asset.ts` or
-`.js`. The VR and Desktop 3D background furniture is built the same way in
-`src/scene-assets/decor.scene-asset.ts` or `.js`, so the starter downloads no
-extra models. To remove any of them, delete their scene nodes and their entries
-in `src/assets.ts` or `src/assets.js`, then delete the files you no longer use.
-The station labels are `public/ui/label-*.uikitml`.
-
-The rest of the look is built-in components in the scene, which you can edit in
-the editor without code. The soft light on every object is the scene root's
-`IBLGradient` (select the Level Root to edit it), and the soft shadows under
-each object are `ContactShadow` nodes. In VR and Desktop 3D, the sky is the
-scene root's `DomeGradient` (its colors, tilt and dither are also on the Level
-Root), and the floor fades into it through the `DomeFade` on the floor node. AR
-projects have no sky or floor, so passthrough stays visible, and a
-`ShadowCatcher` node grounds the stations.
-
-- Minimal scene walkthrough: https://iwsdk.dev/guides/01b-minimal-scene.html
-- XR-enabled projects — IWER emulator controls: https://iwsdk.dev/guides/02-testing-experience.html#iwer-controls
+Verified in the IWSDK emulator (Quest 3 profile, hand input): pinch, pull, release, win, miss, streak
+persistence. Not yet tested on a physical headset.

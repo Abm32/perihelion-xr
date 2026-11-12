@@ -200,6 +200,8 @@ export class OrrerySystem extends createSystem({
         level: this.level,
         message: this.message,
         board: this.root.position.toArray(),
+        yaw: this.root.rotation.y,
+        comet: this.comet.getWorldPosition(new Vector3()).toArray(),
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
       solve: () => solve(this.level).best,
