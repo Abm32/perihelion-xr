@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {
   EMPTY_SAVE,
   HAND_GM,
+  clusterDesk,
+  deskProbePoints,
+  deskSurface,
   launch,
   step,
   LEVELS_PER_DAY,
@@ -36,6 +39,33 @@ assert.ok(fallbacks <= 2, `generator fell back ${fallbacks} times in 120 levels`
   for (let i = 0; i < 60; i++) { step(level, a); step(withHand, b); }
   assert.ok(Number.isFinite(b.x) && Number.isFinite(b.z));
   assert.ok(Math.hypot(a.x - b.x, a.z - b.z) > 0.005, 'hand bends the path');
+}
+
+// Desk scan: a noisy flat desk 2 cm below the board origin with a mug and one noise spike.
+{
+  const rnd = (i) => ((Math.sin(i * 12.9898) * 43758.5453) % 1) * 0.008;
+  const pts = deskProbePoints();
+  assert.ok(pts.length > 40 && pts.length < 120, `probe count ${pts.length}`);
+  const mug = { x: 0.09, z: -0.05 };
+  const samples = pts.map((p, i) => ({
+    ...p,
+    h: -0.02 + rnd(i) + (Math.hypot(p.x - mug.x, p.z - mug.z) < 0.045 ? 0.09 : 0),
+  }));
+  samples[3].h += 0.04; // lone low spike: must be ignored
+  const surface = deskSurface(samples);
+  assert.ok(surface !== null && Math.abs(surface + 0.02) < 0.012, `surface ${surface}`);
+  const found = clusterDesk(samples, surface);
+  assert.equal(found.length, 1, 'one object, spike ignored');
+  assert.ok(Math.hypot(found[0].x - mug.x, found[0].z - mug.z) < 0.03, 'object where the mug is');
+  assert.ok(found[0].r >= 0.02 && found[0].r <= 0.07 && found[0].real);
+  assert.equal(clusterDesk(samples.map((s) => ({ ...s, h: -0.02 })), -0.02).length, 0, 'empty desk');
+  assert.equal(deskSurface(samples.map((s, i) => ({ ...s, h: i * 0.05 }))), null, 'no flat surface');
+  // Board overhanging the desk edge: the near half of the rays reach the floor.
+  const overhang = samples.map((s) => (s.z > 0 ? { ...s, h: -0.72 } : s));
+  const edge = deskSurface(overhang);
+  assert.ok(edge !== null && Math.abs(edge + 0.02) < 0.012, `overhang surface ${edge}`);
+  assert.equal(clusterDesk(overhang, edge).length, 1, 'mug still found, floor ignored');
+  assert.equal(deskSurface(samples.map((s) => ({ ...s, h: -0.9 }))), null, 'board in mid-air');
 }
 
 // Streak: finish day 10, finish day 11, skip 12, open 13.

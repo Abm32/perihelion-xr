@@ -7,11 +7,11 @@ around a star and its planets into the ring.
 - **Built for:** Meta VR Start Developer Competition 2026 — Gaming track, New Experience
 - **Built with:** [Immersive Web SDK](https://developers.meta.com/horizon/documentation/iwsdk/guides/overview/) 1.1 (WebXR, Three.js, ECS), TypeScript, Vite
 
-| Aiming | In flight |
-|---|---|
-| ![Aiming](docs/screens/aim-emulator.png) | ![In flight](docs/screens/flight-emulator.png) |
+| Aiming | In flight | A real cup with gravity |
+|---|---|---|
+| ![Aiming](docs/screens/aim-emulator.png) | ![In flight](docs/screens/flight-emulator.png) | ![Desk object](docs/screens/desk-object-emulator.png) |
 
-<sub>Both frames are from the IWSDK browser emulator (Quest 3 profile, emulated hands, synthetic living room).
+<sub>All frames are from the IWSDK browser emulator (Quest 3 profile, emulated hands, synthetic living room).
 They are not headset captures.</sub>
 
 ## Contents
@@ -24,6 +24,7 @@ They are not headset captures.</sub>
 - [Run, test, deploy](#run-test-deploy)
 - [Competition requirements](#competition-requirements)
 - [Limitations](#limitations)
+- [Engineering log](docs/ENGINEERING.md): every problem we hit and how it was solved
 - [Build log](#build-log)
 
 ## How it plays
@@ -37,6 +38,10 @@ They are not headset captures.</sub>
 - **Your other hand has gravity.** While the comet is flying, pinch the air over the board: that hand becomes
   a gravity well you can move, and the grid sinks under it. Every level can be solved without it, so
   one-handed play always works; a day cleared with no hand gravity earns a gold light.
+- **Your desk joins the sky.** The game looks straight down at the desk under the board with depth-based
+  hit tests. A mug, a stack of books, anything standing more than 3 cm tall becomes a body with gravity and
+  a ring at its base. Move the mug and the puzzle changes.
+- **Real things hide virtual things.** With depth sensing, your hands and desk objects occlude the board.
 - **Shown, not told.** Before your first shot a ghost performs one winning pull and release on a loop.
 - **Three puzzles a day.** The same three skies for everyone, easy to hard. Finish them to grow your streak;
   miss a day and it resets. Each day of the streak adds a light to the far rim (gold for a clean day, blue
@@ -60,6 +65,7 @@ flowchart LR
             VFX["src/vfx.ts<br/>planet, star, grid shaders,<br/>particle pool"]
             SFX["src/sfx.ts<br/>Web Audio oscillators"]
         end
+        DESK["src/desk.ts<br/>DeskScanner: batched<br/>downward hit tests"]
         LS[("localStorage<br/>perihelion.v1")]
     end
 
@@ -68,6 +74,12 @@ flowchart LR
         SU["SceneUnderstandingSystem<br/>XRPlane entities"]
         VIS["world.visibilityState"]
         HEAD["player.head"]
+        DEPTH["DepthSensingSystem<br/>DepthOccludable"]
+    end
+
+    subgraph WebXR["WebXR session"]
+        HT["hit-test<br/>(live depth on Quest 3/3S)"]
+        DS["depth-sensing<br/>(optional)"]
     end
 
     IDX --> ORR & PAN
@@ -79,13 +91,19 @@ flowchart LR
     VIS -->|"enter XR, pause on blur"| ORR
     HEAD -->|"seat position and facing"| ORR
     VIS --> PAN
+    ORR --> DESK
+    DESK -->|"requestHitTestSource"| HT
+    DESK -->|"probe heights"| SIM
+    DS --> DEPTH
+    DEPTH -->|"occlusion uniforms"| VFX
 ```
 
 | File | Responsibility |
 |---|---|
-| `src/sim.ts` | Fixed-step gravity integration, seeded level generator, brute-force solver, day and streak rules. Runs unchanged in Node. |
+| `src/sim.ts` | Fixed-step gravity integration, seeded level generator, brute-force solver, day and streak rules, desk-surface and object clustering. Runs unchanged in Node. |
 | `src/orrery.ts` | The one gameplay system. Owns the board, the phase state machine, HUD canvas, desk placement and the debug hook. |
 | `src/vfx.ts` | Shader materials (planet, atmosphere shell, star, gravity grid) and a fixed-size particle pool. |
+| `src/desk.ts` | `DeskScanner`: 85 downward WebXR hit tests in batches of 10, returning real heights under the board. |
 | `src/sfx.ts` | Every sound is one or two oscillators with an envelope. There are no audio files. |
 | `src/panel.ts` | Browser welcome card (UIKitML). Hidden while immersive. |
 | `src/game-components.ts` | Two tag components: `Comet`, `BoardHandle`. |
@@ -169,6 +187,28 @@ flowchart TD
     C -. "60 attempts exhausted" .-> I["first solvable candidate,<br/>else an open board"]
 ```
 
+### Desk scan
+
+```mermaid
+flowchart TD
+    T["trigger: board placed, board moved,<br/>level loaded, or unsolvable desk (every 3 s)"] --> B["next batch of 10 probe points<br/>(85 on a 4.5 cm hex grid)"]
+    B --> R["requestHitTestSource<br/>ray straight down from 40 cm above the board"]
+    R --> F["read 4 frames of results per probe<br/>(30-frame timeout), then cancel the source"]
+    F --> H{"probe within 12 cm<br/>of a hand?"}
+    H -- yes --> X["discard"]
+    H -- no --> S["keep height in board space"]
+    X & S --> M{"more points?"}
+    M -- yes --> B
+    M -- no --> W["wait for the aim phase"]
+    W --> SF["deskSurface: flat level among probes<br/>within 35 cm of the board"]
+    SF -- none --> K["keep generated level only"]
+    SF -- found --> Y["correct board height"]
+    Y --> C["clusterDesk: probes over 3 cm tall<br/>grouped into up to 3 bodies"]
+    C --> V{"solve(level + desk)<br/>has a hit?"}
+    V -- yes --> OK["rings on the grid, grid sinks,<br/>HUD announces the object"]
+    V -- no --> MV["HUD: move something<br/>rescan in 3 s"]
+```
+
 ### Development and release
 
 ```mermaid
@@ -229,7 +269,7 @@ The heaviest body in a level is drawn as the star; the others are planets lit fr
   board edge and 25 cm of the play plane is projected into board space from its index tip.
 - It joins the flight as an extra body with `gm = 0.006` (a mid-sized planet), no crash radius, and a 2 cm
   softening so a comet passing through the fingers is not flung away.
-- The solver never sees the hand. Levels are accepted on the bodies alone, so the hand is an aid, not a
+- The level generator never sees the hand. Levels are accepted on their generated bodies alone, so the hand is an aid, not a
   requirement. Using it sets `nudged` for the day, which decides the colour of that day's rim light.
 
 ### Onboarding ghost
@@ -239,13 +279,35 @@ its path, and loops a 3.4 s demo: a cue closes on the comet like a pinch, a ghos
 that launch with the band drawn, then the ghost flies the recorded path into the ring. Grabbing the comet
 hides it.
 
+### Real desk objects
+
+- On Quest 3 and 3S (Horizon Browser 40.4+) WebXR hit tests are answered from the live depth map rather
+  than the saved room mesh. A ray cast straight down therefore lands on whatever is really there now.
+- `DeskScanner` never holds more than 10 hit-test sources open and finishes a scan in about a second.
+- `deskSurface` and `clusterDesk` are pure and covered by `npm test`, including a board that overhangs the
+  desk edge and a single noisy probe.
+- A found body has `r` from its footprint (at most 7 cm), `gm` from its probe count (0.0055 to 0.012), and
+  `real: true`. It is not drawn; it gets a ring. The aiming preview, the ghost and the solver all use the
+  generated level plus the desk; the hand is added only for the live flight.
+- If the session refuses a hit-test source, the scanner marks itself unsupported and the game continues
+  with generated bodies only. `?desk=0` turns the scan off.
+
+### Depth occlusion
+
+- `depth-sensing` is requested as an optional feature (`gpu-optimized`, `float32`) and IWSDK's
+  `DepthSensingSystem` is registered. The board root and the rim puck carry `DepthOccludable`.
+- Custom shaders are made compatible in `src/vfx.ts` (`occlude()`); the reasons are in the
+  [engineering log](docs/ENGINEERING.md#13-occlusion-ignored-our-shaders).
+- `?occlusion=hard` switches to single-tap occlusion; `?occlusion=0` turns it off.
+
 ### Desk placement
 
 1. About 0.6 s after the session becomes visible, the board is placed 45 cm ahead of the head along its
    flattened forward direction, 45 cm below eye height, turned to face the player.
 2. Among detected `XRPlane` entities, horizontal planes 20 to 90 cm below the head and within 70 cm of the
    board are candidates; the board drops onto the nearest. Planes that arrive in the next 8 s are also used.
-3. Dragging the rim puck moves the board and ends automatic snapping.
+3. The desk scan then measures the real surface under the board from live depth and corrects the height.
+4. Dragging the rim puck moves the board, ends plane snapping, and triggers a new scan.
 
 The plane test uses each plane's center, not its outline. A very large desk whose center is far away is
 missed; the rim puck covers that case.
@@ -257,7 +319,7 @@ flight freezes and continues afterwards.
 
 ### Debug hook
 
-`window.__perihelion` exposes `state()`, `shoot(px, pz)` and `solve()`. The live test scripts use it. It
+`window.__perihelion` exposes `state()`, `shoot(px, pz)`, `solve()`, `desk()`, `place()`, `scan()`, `lastScan()` and `feed(samples)`. The live test scripts use it. It
 does not change game rules.
 
 ## Visual effects
@@ -336,20 +398,24 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 | Seated, two-foot radius | 54 cm board placed 45 cm ahead; the pull is at most 10 cm. |
 | A complete moment in under ten minutes | Three daily levels; each shot resolves in at most 6 s. |
 | Original, not a wrapper | No third-party service. No network calls after the page loads. |
-| Purposeful passthrough | The board sits on the player's real desk, and the player's own hand, seen in passthrough, is a body in the simulation. |
+| Purposeful passthrough | The board sits on the real desk at its measured height; real objects on it and the player's own hand are bodies in the simulation; real things occlude virtual ones. Turn passthrough off and the puzzle is a different puzzle. |
+| Holds up in untested rooms | Height comes from live depth, not only stored planes; no room setup is needed for the scan; every real-world feature degrades to off if its session feature is missing. |
 | Accessible by default | Every level is solvable with one hand and one gesture; the second hand is optional. |
 | Reason to come back | New seeded set each local day, streak, shots-to-finish for the day, a rim of lights that grows per day and rewards clean clears. |
 
 ## Limitations
 
 - **Not yet tested on a physical headset.** Pinch feel, plane snapping on a real desk and frame rate on
-  Quest hardware are unverified. In the emulator's room no plane fell inside the desk-height window, so the
-  snap path has run only as a no-op there.
+  Quest hardware are unverified. In the emulator, seated at its coffee table, plane snapping and the
+  depth correction both ran (0.424 m, then 0.440 m).
 - Frame rate has not been profiled. The 60 fps minimum is a target, not a measurement.
 - The streak is stored per browser. Clearing site data resets it; there is no account or leaderboard.
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
 - Hand gravity is verified with an emulated pinch only; how it feels with real tracking jitter is unknown.
-- Real-world depth occlusion is not enabled, so virtual objects draw over real hands and objects.
+- Depth occlusion and the desk scan are verified against the emulator's clean depth and geometry only.
+  Real depth is noisier; thresholds and batch sizes are educated guesses. Escape hatches: `?desk=0`,
+  `?occlusion=0`, `?occlusion=hard`.
+- Desk objects are approximated as circles and capped at three.
 - No voice alternative or high-contrast mode yet.
 
 ## Build log
@@ -362,3 +428,6 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - `vfx.ts`: shader planets, star, gravity grid, comet tails, bursts; passthrough alpha fix.
 - Deployed to Vercel.
 - Hand gravity, onboarding ghost and streak lights.
+- Depth occlusion for all materials including custom shaders.
+- Desk scan: real objects become gravity bodies; board height corrected from live depth.
+- Engineering log written.

@@ -13,6 +13,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
+  DepthSensingSystem,
   Group,
   Mesh,
   PlaneGeometry,
@@ -59,6 +60,7 @@ const NOISE = /* glsl */ `
 // World-space normal and view vector. Meshes are only translated and uniformly
 // scaled under the board root, so mat3(modelMatrix) keeps directions correct.
 const SPHERE_VERT = /* glsl */ `
+  #include <common>
   varying vec3 vObj;
   varying vec3 vN;
   varying vec3 vV;
@@ -71,10 +73,31 @@ const SPHERE_VERT = /* glsl */ `
     vL = normalize(mat3(modelMatrix) * uLight);
     vV = normalize(cameraPosition - world.xyz);
     gl_Position = projectionMatrix * viewMatrix * world;
+    #include <fog_vertex>
   }
 `;
 
 const sphere = new SphereGeometry(1, 48, 24);
+
+/**
+ * Opt a custom ShaderMaterial into IWSDK real-world depth occlusion.
+ *
+ * DepthSensingSystem patches materials by string-replacing chunks that only
+ * built-in Three.js materials contain. Our shaders carry the same anchor lines
+ * (`#include <common>`, `#include <fog_vertex>`, `uniform vec3 diffuse;`,
+ * `vec4 diffuseColor = ...`) and are patched once here, because the system
+ * skips a ShaderMaterial on recompile once its uniforms already exist.
+ * With no depth data the injected branch is off and costs one uniform test.
+ */
+function occlude(material: ShaderMaterial): ShaderMaterial {
+  material.uniforms.diffuse = { value: new Color(1, 1, 1) };
+  material.uniforms.opacity = { value: 1 };
+  // Private static in @iwsdk/core 1.1.0-rc.2 (the version is pinned in package.json).
+  // If a later release renames it, occlusion silently stays off for these shaders.
+  (DepthSensingSystem as unknown as { addOcclusionToShader?: (m: unknown) => void })
+    .addOcclusionToShader?.(material);
+  return material;
+}
 
 /** Planet lit by the level's star: banded or mottled surface, terminator, thin atmosphere. */
 export function makePlanet(hue: number, seed: number, light: Vector3): Group {
@@ -92,15 +115,18 @@ export function makePlanet(hue: number, seed: number, light: Vector3): Group {
   };
   const surface = new Mesh(
     sphere,
-    new ShaderMaterial({
+    occlude(new ShaderMaterial({
       uniforms,
       vertexShader: SPHERE_VERT,
       fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
         ${NOISE}
         varying vec3 vObj; varying vec3 vN; varying vec3 vV; varying vec3 vL;
         uniform float uTime; uniform float uSeed; uniform float uBands;
         uniform vec3 uBase; uniform vec3 uAlt; uniform vec3 uAir;
         void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
           // Sample noise on the undeformed sphere direction, spun in the
           // shader so the mesh itself never rotates (keeps lighting simple).
           vec3 p = spinY(vObj, uTime * 0.25) + uSeed;
@@ -116,14 +142,15 @@ export function makePlanet(hue: number, seed: number, light: Vector3): Group {
           float rim = pow(1.0 - max(dot(vN, vV), 0.0), 3.0);
           col += uAir * rim * (0.15 + day) * 0.8; // scattering is strongest at the limb
           gl_FragColor = vec4(col, 1.0);
+          gl_FragColor.a *= diffuseColor.a; // real-world occlusion
         }
       `,
-    }),
+    })),
   );
   // Second, larger back-face shell: brightest at the limb, fading outward.
   const shell = new Mesh(
     sphere,
-    new ShaderMaterial({
+    occlude(new ShaderMaterial({
       uniforms,
       side: BackSide,
       transparent: true,
@@ -131,16 +158,20 @@ export function makePlanet(hue: number, seed: number, light: Vector3): Group {
       blending: AdditiveBlending,
       vertexShader: SPHERE_VERT,
       fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
         varying vec3 vN; varying vec3 vV; varying vec3 vL;
         uniform vec3 uAir;
         void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
           float d = abs(dot(vN, vV));
           float glow = pow(smoothstep(0.0, 0.55, d), 1.6);
           float day = 0.25 + 0.75 * smoothstep(-0.3, 0.5, dot(-vN, vL));
           gl_FragColor = vec4(uAir, glow * day * 0.9); // alpha = intensity, see Particles
+          gl_FragColor.a *= diffuseColor.a; // real-world occlusion
         }
       `,
-    }),
+    })),
   );
   shell.scale.setScalar(1.2);
   const group = new Group();
@@ -155,14 +186,17 @@ export function makeStar(hue: number): Mesh {
   const uniforms = { uTime: { value: 0 }, uLight: { value: new Vector3(0, 1, 0) }, uHot: { value: hot } };
   const star = new Mesh(
     sphere,
-    new ShaderMaterial({
+    occlude(new ShaderMaterial({
       uniforms,
       vertexShader: SPHERE_VERT,
       fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
         ${NOISE}
         varying vec3 vObj; varying vec3 vN; varying vec3 vV;
         uniform float uTime; uniform vec3 uHot;
         void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
           vec3 p = spinY(vObj, uTime * 0.1) * 4.0;
           float cells = fbm(p + vec3(0.0, uTime * 0.35, 0.0));
           float flare = fbm(p * 2.2 - uTime * 0.5);
@@ -170,9 +204,10 @@ export function makeStar(hue: number): Mesh {
           vec3 col = mix(uHot * 0.55, vec3(1.0, 0.96, 0.82), heat);
           float limb = 0.55 + 0.45 * pow(max(dot(vN, vV), 0.0), 0.6);
           gl_FragColor = vec4(col * limb * 1.25, 1.0);
+          gl_FragColor.a *= diffuseColor.a; // real-world occlusion
         }
       `,
-    }),
+    })),
   );
   star.userData.uniforms = uniforms;
   return star;
@@ -187,26 +222,27 @@ export function makeGravityGrid(radius: number) {
   geo.rotateX(-Math.PI / 2);
   const uniforms = {
     // xy = board xz, z = gravitational parameter (0 = unused slot)
-    uBodies: { value: [new Vector3(), new Vector3(), new Vector3(), new Vector3()] }, // last slot: the player's hand
+    uBodies: { value: Array.from({ length: 8 }, () => new Vector3()) }, // level, desk objects, hand (last)
     // xy = board xz of the ring, z = seconds since the hit (<0 = idle)
     uRipple: { value: new Vector3(0, 0, -1) },
     uRadius: { value: radius },
   };
   const mesh = new Mesh(
     geo,
-    new ShaderMaterial({
+    occlude(new ShaderMaterial({
       uniforms,
       transparent: true,
       depthWrite: false,
       vertexShader: /* glsl */ `
-        uniform vec3 uBodies[4];
+        #include <common>
+        uniform vec3 uBodies[8];
         uniform vec3 uRipple;
         varying vec2 vP;
         varying float vDepth;
         void main() {
           vec3 p = position;
           float pot = 0.0;
-          for (int i = 0; i < 4; i++) {
+          for (int i = 0; i < 8; i++) {
             vec2 q = p.xz - uBodies[i].xy;
             pot += uBodies[i].z / sqrt(dot(q, q) + 0.0009);
           }
@@ -220,13 +256,17 @@ export function makeGravityGrid(radius: number) {
           vP = position.xz;
           vDepth = dip / 0.046;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+          #include <fog_vertex>
         }
       `,
       fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
         uniform float uRadius;
         varying vec2 vP;
         varying float vDepth;
         void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
           vec2 g = vP / 0.02;
           vec2 f = abs(fract(g - 0.5) - 0.5) / fwidth(g);
           float line = 1.0 - min(min(f.x, f.y), 1.0);
@@ -234,9 +274,10 @@ export function makeGravityGrid(radius: number) {
           vec3 ink = mix(vec3(0.22, 0.45, 1.0), vec3(1.0, 0.72, 0.35), vDepth);
           vec3 col = mix(vec3(0.012, 0.018, 0.04), ink, line * (0.3 + 0.7 * vDepth));
           gl_FragColor = vec4(col, mask * (0.6 + 0.3 * line));
+          gl_FragColor.a *= diffuseColor.a; // real-world occlusion
         }
       `,
-    }),
+    })),
   );
   return { mesh, uniforms };
 }
@@ -265,13 +306,14 @@ export class Particles {
     geo.setAttribute('aSize', new BufferAttribute(this.size, 1));
     this.points = new Points(
       geo,
-      new ShaderMaterial({
+      occlude(new ShaderMaterial({
         transparent: true,
         depthWrite: false,
         blending: AdditiveBlending,
         // ponytail: 900 px/m is a hand-tuned constant, not derived from the
         // eye viewport. Retune on device if sparks look too big or too small.
         vertexShader: /* glsl */ `
+          #include <common>
           attribute vec4 aColor;
           attribute float aSize;
           varying vec4 vColor;
@@ -280,19 +322,24 @@ export class Particles {
             vec4 mv = modelViewMatrix * vec4(position, 1.0);
             gl_PointSize = aSize * 900.0 / -mv.z;
             gl_Position = projectionMatrix * mv;
+            #include <fog_vertex>
           }
         `,
         fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
           varying vec4 vColor;
           void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
             float d = length(gl_PointCoord - 0.5);
             float a = smoothstep(0.5, 0.0, d);
             // Alpha carries the intensity: in passthrough the framebuffer alpha decides
             // how much real world shows through, so alpha 1 would punch a black square.
             gl_FragColor = vec4(vColor.rgb, a * a * vColor.a);
-          }
+            gl_FragColor.a *= diffuseColor.a; // real-world occlusion
+        }
         `,
-      }),
+      })),
     );
     this.points.frustumCulled = false;
   }

@@ -5,6 +5,7 @@ import {
   CanvasTexture,
   Color,
   createSystem,
+  DepthOccludable,
   Entity,
   Grabbed,
   GrabSystem,
@@ -28,11 +29,15 @@ import {
   XRPlane,
 } from '@iwsdk/core';
 import { BoardHandle, Comet } from './game-components.js';
+import { DeskScanner } from './desk.js';
 import { resumeAudio, sfx } from './sfx.js';
 import { makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
   Body,
   BOARD_R,
+  clusterDesk,
+  DeskSample,
+  deskSurface,
   HAND_GM,
   clearLevel,
   dayNumber,
@@ -55,7 +60,9 @@ import {
 
 type Phase = 'aim' | 'drag' | 'fly' | 'won' | 'miss';
 
-const PLAY_Y = 0.06; // comet plane above the desk, leaves room for fingers
+const PLAY_Y = 0.08; // comet plane above the desk: room for fingers, and clear of depth-occlusion fade
+const HAND_SLOT = 7; // last gravity-grid slot
+const PARAMS = new URLSearchParams(location.search);
 const TRAIL_MAX = 400;
 const PREVIEW_MAX = 48;
 const PREVIEW_STRIDE = 4; // sim steps between preview dots
@@ -122,7 +129,18 @@ export class OrrerySystem extends createSystem({
   // The player's other hand: a gravity well while it pinches during a flight.
   private hand: Body = { x: 0, z: 0, r: 0, gm: 0, hue: 0 };
   private handOrb!: Sprite;
-  private live!: Level; // level plus the hand, used for the real flight only
+  private field!: Level; // generated level plus real desk objects: what the player aims through
+  private live!: Level; // field plus the hand, used for the real flight only
+  private rootEntity!: Entity;
+  private handleEntity!: Entity;
+  // Real desk objects found by the depth scan.
+  private scanner = new DeskScanner();
+  private desk: Body[] = [];
+  private deskRings = new Group();
+  private pendingScan: DeskSample[] | null = null;
+  private lastScan: DeskSample[] = []; // kept for the debug hook
+  private scanIn = -1;
+  private wasBoardHeld = false;
   private logLights = new Group();
   // First-level demo: a ghost performs one winning pull, then the ghost comet flies it.
   private ghost = new Group();
@@ -154,6 +172,7 @@ export class OrrerySystem extends createSystem({
 
   init(): void {
     const rootEntity = this.world.createTransformEntity(this.root);
+    this.rootEntity = rootEntity;
     this.root.position.set(0, 0.85, -0.55);
     this.buildBoard();
 
@@ -178,6 +197,7 @@ export class OrrerySystem extends createSystem({
     );
     this.boardHandle.scale.setScalar(0.016);
     const handleEntity = this.world.createTransformEntity(this.boardHandle);
+    this.handleEntity = handleEntity;
     handleEntity.addComponent(BoardHandle);
     handleEntity.addComponent(OneHandGrabbable, { rotate: false });
 
@@ -226,7 +246,13 @@ export class OrrerySystem extends createSystem({
         comet: this.comet.getWorldPosition(new Vector3()).toArray(),
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
-      solve: () => solve(this.level).best,
+      solve: () => solve(this.field).best,
+      desk: () => this.desk,
+      lastScan: () => this.lastScan,
+      scanner: () => ({ supported: this.scanner.supported, busy: this.scanner.busy }),
+      scan: () => { this.scanIn = 0.01; },
+      place: () => this.placeInFront(),
+      feed: (samples: DeskSample[]) => { this.pendingScan = samples; }, // inject a fake scan
     };
   }
 
@@ -337,6 +363,7 @@ export class OrrerySystem extends createSystem({
       this.band,
       this.shotMesh,
       this.handOrb,
+      this.deskRings,
       this.logLights,
       this.ghost,
       hud,
@@ -352,15 +379,13 @@ export class OrrerySystem extends createSystem({
     this.levelGroup.clear();
     this.timeUniforms.length = 0;
     this.level = levelFor(this.save.day, this.save.index);
-    this.live = { ...this.level, bodies: [...this.level.bodies, this.hand] };
-    this.buildGhost();
+    this.rebuildField();
     this.buildLog();
+    if (this.world.visibilityState.peek() !== VisibilityState.NonImmersive) this.scanIn = 0.4;
 
     const bodies = this.level.bodies;
     const heaviest = bodies.reduce((a, b) => (b.gm > a.gm ? b : a), bodies[0]);
     this.star = heaviest ? { x: heaviest.x, z: heaviest.z } : { x: 0, z: 0 };
-    const slots = this.grid.uniforms.uBodies.value;
-    slots.forEach((v, i) => (bodies[i] ? v.set(bodies[i].x, bodies[i].z, bodies[i].gm) : v.set(0, 0, 0)));
     this.grid.uniforms.uRipple.value.z = -1;
     const color = new Color();
     for (const b of bodies) {
@@ -396,6 +421,7 @@ export class OrrerySystem extends createSystem({
     this.trailCount = 0;
     this.trail.geometry.setDrawRange(0, 0);
     this.resetComet();
+    this.refreshOcclusion();
     this.say(
       this.save.index === 0 && this.save.shots === 0
         ? 'Pinch the comet. Pull back. Let go.'
@@ -424,13 +450,13 @@ export class OrrerySystem extends createSystem({
     this.ghostN = 0;
     this.ghost.visible = false;
     if (this.save.index !== 0 || this.save.shots !== 0) return;
-    const best = solve(this.level).best;
+    const best = solve(this.field).best;
     if (!best) return;
     this.ghostPull = best;
-    const s = launch(this.level, best.px, best.pz);
+    const s = launch(this.field, best.px, best.pz);
     let o: Outcome = 'flying';
     for (let i = 0; o === 'flying' && this.ghostN < 240; i++) {
-      o = step(this.level, s);
+      o = step(this.field, s);
       if (i % 3 === 0) {
         this.ghostPath[this.ghostN * 2] = s.x;
         this.ghostPath[this.ghostN * 2 + 1] = s.z;
@@ -506,13 +532,116 @@ export class OrrerySystem extends createSystem({
     this.hand.gm = active ? HAND_GM : 0;
     this.handOrb.visible = active;
     this.handOrb.position.set(this.hand.x, PLAY_Y, this.hand.z);
-    this.grid.uniforms.uBodies.value[3].set(this.hand.x, this.hand.z, this.hand.gm);
+    this.grid.uniforms.uBodies.value[HAND_SLOT].set(this.hand.x, this.hand.z, this.hand.gm);
   }
 
   private releaseHand(): void {
     this.hand.gm = 0;
     this.handOrb.visible = false;
-    this.grid.uniforms.uBodies.value[3].set(0, 0, 0);
+    this.grid.uniforms.uBodies.value[HAND_SLOT].set(0, 0, 0);
+  }
+
+  // ---- real world: desk objects and occlusion ---------------------------------
+
+  /** Recompose what the comet flies through: generated bodies, real desk objects, then the hand. */
+  private rebuildField(): void {
+    this.field = { ...this.level, bodies: [...this.level.bodies, ...this.desk] };
+    this.live = { ...this.field, bodies: [...this.field.bodies, this.hand] };
+    const slots = this.grid.uniforms.uBodies.value;
+    const bodies = this.field.bodies;
+    for (let i = 0; i < HAND_SLOT; i++) {
+      if (bodies[i]) slots[i].set(bodies[i].x, bodies[i].z, bodies[i].gm);
+      else slots[i].set(0, 0, 0);
+    }
+    // A real object is its own visual. It only gets a ring on the grid at its base.
+    this.deskRings.traverse((o) => {
+      const m = o as Mesh;
+      (m.material as MeshBasicMaterial | undefined)?.dispose?.();
+      m.geometry?.dispose();
+    });
+    this.deskRings.clear();
+    for (const b of this.desk) {
+      const ring = new Mesh(
+        new RingGeometry(b.r, b.r + 0.004, 48),
+        new MeshBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0.9 }),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(b.x, PLAY_Y - 0.006, b.z);
+      this.deskRings.add(ring);
+    }
+    this.buildGhost();
+  }
+
+  /** Apply a finished scan: settle the board on the real surface, then adopt what stands on it. */
+  private applyScan(samples: DeskSample[]): void {
+    this.lastScan = samples;
+    const surface = deskSurface(samples);
+    if (surface === null) return; // no flat surface under the board: keep the generated level only
+    // Depth-based height is live; it corrects a missing or stale plane.
+    this.root.position.y += surface + 0.004;
+    const before = this.desk.length;
+    this.desk = clusterDesk(samples, surface);
+    if (this.desk.length === 0 && before === 0) return;
+    this.rebuildField();
+    this.refreshOcclusion();
+    if (this.desk.length === 0) {
+      this.say('Desk cleared.');
+    } else if (solve(this.field).count === 0) {
+      this.say('Your desk blocks every path. Move something.');
+      this.scanIn = 3; // look again once the player has had time to move it
+    } else if (this.desk.length !== before) {
+      this.say(this.desk.length === 1 ? 'That object on your desk has gravity now.' : `${this.desk.length} things on your desk have gravity now.`);
+    }
+  }
+
+  private updateScan(delta: number): void {
+    if (PARAMS.get('desk') === '0') return;
+    const held = this.queries.boardHeld.entities.size > 0;
+    if (this.wasBoardHeld && !held) this.scanIn = 0.5; // board was moved: the desk under it changed
+    this.wasBoardHeld = held;
+    if (this.scanIn >= 0 && !held) {
+      this.scanIn -= delta;
+      if (this.scanIn < 0) this.scanner.start();
+    }
+    const session = this.xrManager.getSession();
+    const frame = this.xrFrame;
+    const refSpace = this.xrManager.getReferenceSpace();
+    if (session && frame && refSpace && this.scanner.busy) {
+      const done = this.scanner.update(session, frame, refSpace, this.root, this.player, this.underHand);
+      if (done) this.pendingScan = done;
+    } else if (!session && this.scanner.busy) {
+      this.scanner.cancel();
+    }
+    // Never change the field under a comet in flight.
+    if (this.pendingScan && this.phase === 'aim') {
+      const samples = this.pendingScan;
+      this.pendingScan = null;
+      this.applyScan(samples);
+    }
+  }
+
+  /** True when a board-space point is within 12 cm of either hand. */
+  private underHand = (x: number, z: number): boolean => {
+    for (const side of ['left', 'right'] as const) {
+      this.player.gripSpaces[side].getWorldPosition(this.v1);
+      this.root.worldToLocal(this.v1);
+      if (Math.abs(this.v1.y) < 0.5 && Math.hypot(this.v1.x - x, this.v1.z - z) < 0.12) return true;
+    }
+    return false;
+  };
+
+  /**
+   * DepthSensingSystem patches materials once, when the component is added.
+   * Levels create new materials, so re-add the component to patch those too.
+   */
+  private refreshOcclusion(): void {
+    const mode = PARAMS.get('occlusion');
+    if (mode === '0') return;
+    const value = { mode: mode === 'hard' ? 'HardOcclusion' : 'SoftOcclusion' } as const;
+    for (const entity of [this.rootEntity, this.handleEntity]) {
+      if (entity.hasComponent(DepthOccludable)) entity.removeComponent(DepthOccludable);
+      entity.addComponent(DepthOccludable, value);
+    }
   }
 
   // ---- HUD ----------------------------------------------------------------
@@ -559,6 +688,7 @@ export class OrrerySystem extends createSystem({
     this.root.rotation.y = Math.atan2(-this.v2.x, -this.v2.z);
     this.snapWindow = 8; // planes often arrive a few seconds into the session
     this.snapToDesk();
+    this.scanIn = 1.2; // then look at what is really on the desk
   }
 
   /** Drop the board onto the nearest real horizontal surface at desk height. */
@@ -688,10 +818,10 @@ export class OrrerySystem extends createSystem({
     const dots = this.level.difficulty === 0 ? PREVIEW_MAX : 20;
     let n = 0;
     if (pull * MAX_PULL >= MIN_PULL) {
-      const s = launch(this.level, px, pz, this.scratch);
+      const s = launch(this.field, px, pz, this.scratch);
       outer: for (; n < dots; n++) {
         for (let k = 0; k < PREVIEW_STRIDE; k++) {
-          if (step(this.level, s) !== 'flying') break outer;
+          if (step(this.field, s) !== 'flying') break outer;
         }
         this.previewPos.set([s.x, PLAY_Y, s.z], n * 3);
       }
@@ -714,6 +844,7 @@ export class OrrerySystem extends createSystem({
       if (this.placeIn < 0) this.placeInFront();
     }
     if (this.snapWindow > 0) this.snapWindow -= delta;
+    this.updateScan(delta);
 
     // Rim puck drags the board; otherwise it rides along on the rim.
     if (this.queries.boardHeld.entities.size > 0) {
