@@ -503,6 +503,21 @@ python3 scripts/make-demo.py # trims, captions, title cards, synthesized pad -> 
 `test/rec.mjs` records Chrome's screencast (the picture `browser screenshot` takes) with real frame
 timings while the CLI drives the emulated hand.
 
+### Voice-over studio
+
+`tools/voiceover/` is a single local page for narrating the demo in one take. It plays the video, shows the
+script as a teleprompter with each word lit when it should be spoken, and records the picture, your voice
+and your face (a rounded bubble in a corner) together. Stop ends the take exactly there.
+
+```bash
+python3 -m http.server 8090 --bind 127.0.0.1     # from the project root
+# open http://localhost:8090/tools/voiceover/
+tools/voiceover/to-mp4.sh ~/Downloads/perihelion-voiceover.webm   # optional: WebM -> MP4
+```
+
+The script is editable in the page (`seconds | what to say` per line) and its cue times match the cut.
+Nothing leaves the computer: recording uses the browser's own `MediaRecorder`.
+
 ## Competition requirements
 
 | Requirement or guideline | How Perihelion meets it |

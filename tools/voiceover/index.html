@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Perihelion voice-over studio</title>
+    <style>
+      :root {
+        --bg: #070a12;
+        --panel: #0f1524;
+        --line: #1f2a44;
+        --text: #e6ecff;
+        --dim: #7f8db3;
+        --gold: #ffd76b;
+        --blue: #9fe8ff;
+        --red: #ff5d6c;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, sans-serif; }
+      main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 40px; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .sub { color: var(--dim); margin: 0 0 14px; }
+      .stage { position: relative; background: #000; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+      canvas { display: block; width: 100%; height: auto; }
+      .badge { position: absolute; top: 12px; left: 12px; padding: 5px 12px; border-radius: 999px; font-weight: 700; background: rgba(7, 10, 18, 0.85); }
+      .badge.rec { background: var(--red); color: #fff; }
+      .count { position: absolute; inset: 0; display: none; place-items: center; font-size: 160px; font-weight: 800; background: rgba(7, 10, 18, 0.55); }
+      .prompter { margin-top: 14px; padding: 18px 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; min-height: 150px; }
+      .now { font-size: 34px; line-height: 1.3; font-weight: 650; }
+      .now span { color: #4a587d; transition: color 0.08s linear; }
+      .now span.said { color: var(--text); }
+      .now span.cur { color: var(--gold); }
+      .next { margin-top: 12px; color: var(--dim); font-size: 19px; }
+      .bar { height: 5px; background: var(--line); border-radius: 3px; margin-top: 14px; overflow: hidden; }
+      .bar i { display: block; height: 100%; width: 0; background: var(--blue); }
+      .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+      button { font: inherit; font-weight: 650; color: var(--text); background: #1a2540; border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; cursor: pointer; }
+      button:hover:not(:disabled) { background: #24335a; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      button.primary { background: var(--red); border-color: var(--red); color: #fff; }
+      .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px 18px; margin-top: 14px; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+      label { display: block; color: var(--dim); font-size: 13px; }
+      select, input[type='range'] { width: 100%; margin-top: 4px; }
+      select { font: inherit; color: var(--text); background: #1a2540; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+      details { margin-top: 14px; }
+      summary { cursor: pointer; color: var(--dim); }
+      textarea { width: 100%; height: 260px; margin-top: 8px; font: 13px/1.5 ui-monospace, monospace; color: var(--text); background: #0b1020; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+      #status { color: var(--dim); margin-left: 4px; }
+      #result { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--gold); border-radius: 14px; display: none; }
+      #result a { color: var(--gold); font-weight: 700; }
+      code { background: #0b1020; padding: 2px 6px; border-radius: 6px; }
+      video.take { width: 100%; margin-top: 10px; border-radius: 10px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Perihelion voice-over studio</h1>
+      <p class="sub">
+        Plays the demo, shows what to say and when, and records the video with your voice and face in one take.
+        Everything stays on this computer.
+      </p>
+
+      <div class="stage">
+        <canvas id="stage" width="1280" height="720"></canvas>
+        <div class="badge" id="badge">Ready</div>
+        <div class="count" id="count"></div>
+      </div>
+
+      <div class="prompter">
+        <div class="now" id="now">Press <b>Start camera and mic</b>, then <b>Rehearse</b> to practise or <b>Record</b> to capture.</div>
+        <div class="next" id="next"></div>
+        <div class="bar"><i id="bar"></i></div>
+      </div>
+
+      <div class="controls">
+        <button id="cam">Start camera and mic</button>
+        <button id="rehearse">Rehearse</button>
+        <button id="rec" class="primary" disabled>● Record</button>
+        <button id="stop" disabled>■ Stop</button>
+        <span id="status"></span>
+      </div>
+
+      <div class="opts">
+        <label>Face bubble position
+          <select id="pos">
+            <option value="br">Bottom right</option>
+            <option value="bl">Bottom left</option>
+            <option value="tl">Top left</option>
+            <option value="tr">Top right</option>
+            <option value="off">No face (voice only)</option>
+          </select>
+        </label>
+        <label>Bubble shape
+          <select id="shape">
+            <option value="round">Rounded square</option>
+            <option value="circle">Circle</option>
+          </select>
+        </label>
+        <label>Bubble size <input id="size" type="range" min="120" max="320" value="200" /></label>
+        <label>Video music in the recording <input id="music" type="range" min="0" max="100" value="35" /></label>
+        <label>Your voice level <input id="voice" type="range" min="0" max="200" value="100" /></label>
+        <label>Highlight runs ahead of the video (0 to 1 s) <input id="lead" type="range" min="0" max="10" value="3" /></label>
+      </div>
+
+      <div id="result"></div>
+
+      <details>
+        <summary>Edit the script (one line per cue: <code>seconds | what to say</code>)</summary>
+        <textarea id="script" spellcheck="false"></textarea>
+        <div class="controls"><button id="reset">Restore the original script</button></div>
+      </details>
+    </main>
+
+    <!-- The demo video. Hidden: it is drawn onto the canvas, which is what gets recorded. -->
+    <video id="demo" src="../../perihelion-demo.mp4" preload="auto" playsinline style="display: none"></video>
+    <video id="face" muted playsinline style="display: none"></video>
+
+    <script>
+      // Cue times match the cut in scripts/make-demo.py. Each line is spoken from its
+      // time until the next line's time.
+      const DEFAULT_SCRIPT = `0.4 | This is Perihelion. A daily gravity puzzle that lives on your desk.
+4.4 | Before your first shot, a ghost shows you the move.
+9.8 | Pinch the comet, pull back, and let go. One gesture, hands only.
+17.4 | Level two is an empty sky. Nothing here has gravity, so the comet flies straight into the rock.
+24.4 | There is no path. So you make one. Pinch the air, and you plant gravity.
+31.0 | Now the path bends around the rock. You are the gravity.
+40.0 | It plays on your real desk.
+44.6 | It scans the desk with live depth, and that cup has gravity now too.
+51.2 | Real objects bend the comet. Move the cup, and the puzzle changes.
+60.5 | Level three. A black hole, and a moon that moves only while the comet flies.
+66.1 | Slow motion at the closest pass. Three new skies every day.
+72.5 | No headset? It plays with a mouse, a webcam, or an Android phone in A R. Every level is solved before you see it, and everything you see and hear is generated in code.
+87.5 | Perihelion. You are the gravity.`;
+
+      const $ = (id) => document.getElementById(id);
+      const demo = $('demo');
+      const face = $('face');
+      const canvas = $('stage');
+      const g = canvas.getContext('2d');
+      const W = canvas.width;
+      const H = canvas.height;
+      const KEY = 'perihelion.voiceover';
+
+      // ---- settings that persist ------------------------------------------------
+      const saved = (() => {
+        try { return JSON.parse(localStorage.getItem(KEY) ?? '{}'); } catch { return {}; }
+      })();
+      const persist = () => {
+        const data = { script: $('script').value };
+        for (const id of ['pos', 'shape', 'size', 'music', 'voice', 'lead']) data[id] = $(id).value;
+        try { localStorage.setItem(KEY, JSON.stringify(data)); } catch { /* storage blocked: settings just reset next time */ }
+      };
+      for (const id of ['pos', 'shape', 'size', 'music', 'voice', 'lead']) {
+        if (saved[id] != null) $(id).value = saved[id];
+        $(id).addEventListener('input', () => { persist(); applyLevels(); });
+      }
+      $('script').value = saved.script || DEFAULT_SCRIPT;
+
+      // ---- script ---------------------------------------------------------------
+      let cues = [];
+      let shown = -2; // index of the line on the prompter; -2 forces a redraw
+      function parseScript() {
+        cues = $('script').value
+          .split('\n')
+          .map((line) => line.match(/^\s*([\d.]+)\s*\|\s*(.+?)\s*$/))
+          .filter(Boolean)
+          .map((m) => ({ at: Number(m[1]), words: m[2].split(/\s+/) }))
+          .sort((a, b) => a.at - b.at);
+        cues.forEach((cue, i) => {
+          cue.end = i + 1 < cues.length ? cues[i + 1].at : (demo.duration || cue.at + 6);
+          // Longer words take longer to say: pace the highlight by letters, not word count.
+          let sum = 0;
+          cue.marks = cue.words.map((w) => (sum += w.length + 1.5));
+          cue.total = sum;
+        });
+        shown = -2; // force the prompter to redraw
+      }
+      $('script').addEventListener('input', () => { parseScript(); persist(); });
+      $('reset').onclick = () => { $('script').value = DEFAULT_SCRIPT; parseScript(); persist(); };
+      demo.addEventListener('loadedmetadata', parseScript);
+      parseScript();
+
+      function prompter(t) {
+        let i = -1;
+        for (let k = 0; k < cues.length; k++) if (t >= cues[k].at) i = k;
+        const now = $('now');
+        if (i !== shown) {
+          shown = i;
+          if (i < 0) {
+            now.textContent = cues.length ? 'Get ready…' : 'No script lines found.';
+          } else {
+            now.innerHTML = cues[i].words.map((w) => `<span>${w.replace(/</g, '&lt;')}</span>`).join(' ');
+          }
+          $('next').textContent = cues[i + 1] ? 'Next: ' + cues[i + 1].words.join(' ') : '';
+        }
+        if (i < 0) return;
+        const cue = cues[i];
+        // Finish each line a little before the next cue, so there is a breath between lines.
+        const span = Math.max(0.6, cue.end - cue.at - 0.6);
+        const p = Math.min(1, (t - cue.at) / span) * cue.total;
+        const spans = now.children;
+        let current = -1;
+        for (let k = 0; k < spans.length; k++) {
+          const done = cue.marks[k] <= p;
+          spans[k].className = done ? 'said' : '';
+          if (!done && current < 0) current = k;
+        }
+        if (current >= 0) spans[current].className = 'cur';
+      }
+
+      // ---- picture: demo frame plus the face bubble -----------------------------
+      function bubbleRect() {
+        const size = Number($('size').value);
+        const m = 22;
+        const pos = $('pos').value;
+        // Bottom positions sit above the caption band so captions stay readable.
+        const y = pos[0] === 't' ? m + 30 : H - size - 118;
+        const x = pos[1] === 'l' ? m : W - size - m;
+        return { x, y, size };
+      }
+      function shapePath(x, y, size) {
+        g.beginPath();
+        if ($('shape').value === 'circle') g.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+        else g.roundRect(x, y, size, size, size * 0.2);
+      }
+      function draw() {
+        if (demo.readyState >= 2) g.drawImage(demo, 0, 0, W, H);
+        else { g.fillStyle = '#05070d'; g.fillRect(0, 0, W, H); }
+        if ($('pos').value !== 'off' && face.readyState >= 2) {
+          const { x, y, size } = bubbleRect();
+          // Crop the camera to a centred square and mirror it, like a selfie view.
+          const side = Math.min(face.videoWidth, face.videoHeight);
+          const sx = (face.videoWidth - side) / 2;
+          const sy = (face.videoHeight - side) / 2;
+          g.save();
+          shapePath(x, y, size);
+          g.clip();
+          g.translate(x + size, y);
+          g.scale(-1, 1);
+          g.drawImage(face, sx, sy, side, side, 0, 0, size, size);
+          g.restore();
+          shapePath(x, y, size);
+          g.lineWidth = 4;
+          g.strokeStyle = 'rgba(255,255,255,0.9)';
+          g.stroke();
+        }
+        const t = demo.currentTime;
+        prompter(running ? t + Number($('lead').value) / 10 : t);
+        $('bar').style.width = demo.duration ? (t / demo.duration) * 100 + '%' : '0';
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+
+      // ---- sound: your voice plus (optionally) the video's music -----------------
+      let audio = null; // { ctx, out, micGain, musicGain }
+      function ensureAudio() {
+        if (audio) return audio;
+        const ctx = new AudioContext();
+        const out = ctx.createMediaStreamDestination();
+        const musicGain = ctx.createGain();
+        // Routed only into the recording, not the speakers, so the mic cannot pick it up.
+        ctx.createMediaElementSource(demo).connect(musicGain).connect(out);
+        audio = { ctx, out, musicGain, micGain: null };
+        applyLevels();
+        return audio;
+      }
+      function applyLevels() {
+        if (!audio) return;
+        audio.musicGain.gain.value = Number($('music').value) / 100;
+        if (audio.micGain) audio.micGain.gain.value = Number($('voice').value) / 100;
+      }
+
+      let camStream = null;
+      $('cam').onclick = async () => {
+        try {
+          camStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: 'user' },
+            audio: { echoCancellation: true, noiseSuppression: true },
+          });
+        } catch (error) {
+          try {
+            // No camera, or it was refused: carry on with voice only.
+            camStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            $('pos').value = 'off';
+          } catch (e) {
+            $('status').textContent = 'Camera and microphone unavailable: ' + e.message;
+            return;
+          }
+        }
+        if (camStream.getVideoTracks().length) {
+          face.srcObject = new MediaStream(camStream.getVideoTracks());
+          await face.play();
+        }
+        const a = ensureAudio();
+        a.micGain = a.ctx.createGain();
+        a.ctx.createMediaStreamSource(new MediaStream(camStream.getAudioTracks())).connect(a.micGain).connect(a.out);
+        applyLevels();
+        $('rec').disabled = false;
+        $('cam').disabled = true;
+        $('status').textContent = 'Camera and mic are on. Use headphones if you want to hear the video.';
+      };
+
+      // ---- transport ---------------------------------------------------------------
+      let running = false;
+      let recorder = null;
+      let chunks = [];
+
+      function badge(text, rec) {
+        $('badge').textContent = text;
+        $('badge').className = 'badge' + (rec ? ' rec' : '');
+      }
+      async function countdown() {
+        const el = $('count');
+        el.style.display = 'grid';
+        for (const n of [3, 2, 1]) {
+          el.textContent = n;
+          await new Promise((r) => setTimeout(r, 800));
+        }
+        el.style.display = 'none';
+      }
+      async function start(record) {
+        if (running) return;
+        ensureAudio();
+        await audio.ctx.resume();
+        demo.pause();
+        demo.currentTime = 0;
+        $('result').style.display = 'none';
+        $('rehearse').disabled = $('rec').disabled = true;
+        await countdown();
+        if (record) {
+          const stream = new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...audio.out.stream.getAudioTracks()]);
+          const type = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/webm;codecs=vp9,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+          chunks = [];
+          recorder = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 160_000 });
+          recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+          recorder.onstop = () => finish(type);
+          recorder.start(500);
+        }
+        running = true;
+        $('stop').disabled = false;
+        badge(record ? '● REC' : 'Rehearsal', record);
+        await demo.play();
+      }
+      function stop() {
+        if (!running) return;
+        running = false;
+        demo.pause();
+        $('stop').disabled = true;
+        $('rehearse').disabled = false;
+        $('rec').disabled = !camStream;
+        badge('Ready');
+        if (recorder && recorder.state !== 'inactive') recorder.stop();
+        recorder = null;
+      }
+      function finish(type) {
+        const ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
+        const blob = new Blob(chunks, { type });
+        const url = URL.createObjectURL(blob);
+        const name = `perihelion-voiceover.${ext}`;
+        const box = $('result');
+        box.style.display = 'block';
+        box.innerHTML =
+          `<b>Take captured:</b> ${demo.currentTime.toFixed(1)} s, ${(blob.size / 1e6).toFixed(1)} MB. ` +
+          `<a href="${url}" download="${name}">Download ${name}</a> ` +
+          (ext === 'webm' ? '— YouTube accepts WebM as is. ' : '') +
+          `Not happy with it? Press Record again; nothing is kept until you download.` +
+          `<video class="take" src="${url}" controls></video>`;
+        box.scrollIntoView({ behavior: 'smooth' });
+      }
+      $('rehearse').onclick = () => start(false);
+      $('rec').onclick = () => start(true);
+      $('stop').onclick = stop;
+      demo.addEventListener('ended', stop);
+      demo.addEventListener('error', () => {
+        $('status').textContent = 'Could not load ../../perihelion-demo.mp4. Serve this page from the project root.';
+      });
+    </script>
+  </body>
+</html>
