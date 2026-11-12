@@ -8,6 +8,7 @@ question, and none of them replaces a person wearing one.
 | [Simulated playtest](#1-simulated-playtest) | How many shots does an imprecise person need? Is the answer forgiving? | Whether it is fun |
 | [Desktop play, mouse or webcam hands](#2-play-it-yourself) | How do the pull, slow motion, planted gravity and ghost feel? | Depth, presence, comfort, real tracking |
 | [Emulated XR hands](#3-emulated-xr-hands) | Does the real input path work end to end? | Anything about feel |
+| [Self-measurement](#4-self-measurement-on-any-headset) | Frame rate, hand steadiness and depth noise on a real device | Nothing, until someone with a headset opens the link |
 
 ## 1. Simulated playtest
 
@@ -67,6 +68,25 @@ a few tries. The empty sky is still the hardest: the modelled player plants grav
 it, and does not get the hint ring or the option of using a real object, so the 23% is pessimistic, but it
 is the level to watch.
 
+### Against published hand-tracking error
+
+Two studies measured Quest hand tracking against a ground truth: about 1.1 cm average fingertip error on
+Quest 2 (Abdlkarim et al., *Behavior Research Methods*, 2023) and 1.73 cm on Quest 3 in best conditions
+(robotic characterisation, IEEE, 2025), with the knuckle steadier than the fingertip. Those are *absolute*
+errors: how far the tracked finger is from the real one. The player aims by watching the rendered comet,
+so a constant offset cancels out; what hurts is wobble and the jump on release. Treating the whole
+published error as random per-shot error is therefore the pessimistic case:
+
+| Hand error | Level 1 median / answer survives | Level 2 empty sky | Level 3 hard |
+|---|---|---|---|
+| 5 mm (our working figure) | 1 shot / 96% | 5 / 80% | 3 / 71% |
+| 11 mm (Quest 2 absolute error) | 1 / 68% | 6 / 62% | 4 / 48% |
+| 17.3 mm (Quest 3 absolute error) | 2 / 54% | 7 / 47% | 4 / 35% |
+
+Even in the pessimistic case level 1 is a one- or two-shot win and level 3 takes about four. Because the
+studies found fingertips noisier than knuckles, a planted well now follows the fingertip with a short lag
+instead of raw.
+
 ### Limits of the model
 
 The 5 mm figure is an assumption, not a measurement of Quest hand tracking. The learner is cruder than a
@@ -100,6 +120,54 @@ MediaPipe's jitter is not Quest's. It is for judging pacing and strength, with r
 **Verification status.** The mouse path is tested by automation with a real pointer drag. The webcam path
 shares all game-side code with the mouse, and its three downloads were checked to resolve, but the tracking
 loop itself has not been run by us: there is no camera on the build machine.
+
+## 4. Self-measurement on any headset
+
+Three things could not be measured without a device: frame rate, how steady a real tracked hand is, and how
+noisy real depth is. So the app measures them itself during every immersive session (`src/perf.ts`):
+
+| Measured | How |
+|---|---|
+| Average frame rate, slowest 1%, share of frames under 60 fps | Every frame's delta, up to the last 100 s |
+| Display rate the session targets | `XRSession.frameRate`, where the browser reports it |
+| Cost of the game's own update | `performance.now()` around the system update |
+| How far the governor stepped occlusion down | Governor state |
+| Hand wobble while holding a pull | RMS distance between the raw and smoothed hand while it moves under 5 cm/s |
+| Jump at release | Raw-versus-smoothed distance at the instant of letting go, median over shots |
+| Depth noise | Spread of desk-scan probe heights around the fitted surface |
+
+When the session ends, the report is saved in that browser and printed at the top-left of the page:
+
+```
+Last session (Quest 3, 94 s): 71.8 fps avg, 1% low 61.2, 0.4% of frames under 60, target 72;
+update 0.4 ms; soft occlusion; hand jitter 2.1 mm, release twitch 3.4 mm over 9 shots; depth noise 8.2 mm
+```
+
+(Example format; those numbers are illustrative, not a measurement.) Nothing is transmitted. **Anyone with
+a Quest can measure the game for us:** open the link, play two minutes, leave the session, and screenshot
+the page. Adding `?perf=1` also shows live frame rate on the in-game HUD.
+
+Meta's own tooling gives a second opinion on device: the OVR Metrics Tool overlay for frame rate, and
+`chrome://inspect` tracing from a connected computer.
+
+### What we could measure today
+
+In the emulator, with Chrome's CPU throttle (the GPU is not throttled, so this bounds script cost only):
+
+| CPU slowdown | Game update, average | Worst single update |
+|---|---|---|
+| 1x | 0.10 ms | 9 ms |
+| 4x | 0.28 ms | 29 ms |
+| 6x | 0.41 ms | 43 ms |
+
+At 72 Hz a frame has 13.9 ms. The steady-state update is a few percent of that even at 6x. The worst case
+is a single frame when a new level is generated and solved; it happens between levels, during the win
+animation. Frame *rate* in the headless emulator is not reported here: it reflects this machine's software
+renderer, not a headset.
+
+The depth scan also adapts to what it measures: the height an object must clear is three times the
+measured noise (never less than 3.5 cm). In simulation with 2 cm noise, phantom objects per scan fell from
+106 in 300 to 1 in 300, and to 0 with two-scan agreement.
 
 ## 3. Emulated XR hands
 

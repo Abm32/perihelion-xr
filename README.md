@@ -126,6 +126,7 @@ flowchart LR
 | `src/orrery.ts` | The one gameplay system. Owns the board, the phase state machine, HUD canvas, desk placement and the debug hook. |
 | `src/vfx.ts` | Shader materials (planet, atmosphere shell, star, gravity grid) and a fixed-size particle pool. |
 | `src/camera-hands.ts` | Webcam hand tracking (MediaPipe) as board pointers, for play without a headset. |
+| `src/perf.ts` | Self-measurement: frame rate, update cost, hand wobble, depth noise; report shown after a session. |
 | `src/tuning.ts` | Feel constants and the `?tune=1` slider panel. |
 | `src/desk.ts` | `DeskScanner`: 85 downward WebXR hit tests in batches of 10, returning real heights under the board. |
 | `src/sfx.ts` | Every sound is one or two oscillators with an envelope. There are no audio files. |
@@ -332,6 +333,8 @@ hides it.
 - `DeskScanner` never holds more than 10 hit-test sources open and finishes a scan in about a second.
 - `deskSurface` and `clusterDesk` are pure and covered by `npm test`, including a board that overhangs the
   desk edge and a single noisy probe.
+- The scan measures depth noise from the spread of probe heights on the flat surface and requires an
+  object to clear three times that (at least 3.5 cm).
 - An object needs two adjacent probes at least 3.5 cm tall, and two scans in a row that agree on where it
   is. Under simulated depth noise (1.2 cm jitter, 3% outliers of 5 cm) a single scan invents an object
   about 1 time in 9; requiring agreement brought that to 0 in 300 trials while keeping a real mug in 299.
@@ -391,6 +394,14 @@ release was run under the glasses profile and launched normally.
 
 While `visibilityState` is `VisibleBlurred` (system menu open) the system skips its update, so a shot in
 flight freezes and continues afterwards.
+
+### Self-measurement
+
+The app records its own frame rate, update cost, hand steadiness and depth noise during every immersive
+session and prints a one-line report on the page afterwards (`src/perf.ts`). Nothing is transmitted. If
+you have a Quest: open the link, play two minutes, leave the session, and the line at the top-left of the
+page is a real measurement. `?perf=1` adds live frame rate to the HUD. Details and what could be measured
+without a device are in [playtesting](docs/PLAYTEST.md#4-self-measurement-on-any-headset).
 
 ### Render cost
 
@@ -496,7 +507,10 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
   depth correction both ran (0.424 m, then 0.440 m).
 - The field-of-view check assumes the default seat. A player sitting much closer, or with the board
   dragged far to one side, can push the rim puck or HUD out of a narrow view.
-- Frame rate has not been profiled. The 60 fps minimum is a target, not a measurement.
+- Frame rate has not been measured on a device. The app reports it after any immersive session, but no
+  such session has happened yet. Script cost is bounded (0.41 ms per frame at 6x CPU slowdown); GPU cost is not.
+- Level generation takes one long frame between levels (43 ms at 6x CPU slowdown).
+- The 60 fps minimum is a target, not a measurement.
 - The streak is stored per browser. Clearing site data resets it; there is no account or leaderboard.
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
 - Planted gravity is verified with an emulated pinch and with a mouse; how it feels with real tracking
@@ -529,3 +543,5 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Simulated playtest written; draw lengthened, ring widened, forgiving answers required.
 - Planted gravity and empty-sky levels; mouse, webcam and tuning play without a headset.
 - Desk scan hardened against depth noise with two-scan agreement.
+- Self-measurement report; object threshold adapts to measured depth noise; playtest re-run at published
+  hand-tracking error.

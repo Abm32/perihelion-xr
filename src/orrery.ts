@@ -32,6 +32,7 @@ import { BoardHandle, Comet } from './game-components.js';
 import { startCameraHands } from './camera-hands.js';
 import { DeskScanner } from './desk.js';
 import { resumeAudio, sfx } from './sfx.js';
+import { PerfRecorder } from './perf.js';
 import { initTuning, tune } from './tuning.js';
 import { makeBlackHole, makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
@@ -40,6 +41,7 @@ import {
   BOARD_R,
   clusterDesk,
   confirmDesk,
+  deskNoise,
   DeskSample,
   deskSurface,
   clearLevel,
@@ -53,6 +55,7 @@ import {
   MAX_PULL,
   MIN_PULL,
   mulberry32,
+  objectThreshold,
   openDay,
   Outcome,
   Save,
@@ -153,6 +156,9 @@ export class OrrerySystem extends createSystem({
   // Desktop play (mouse or webcam hands): what each pointer is holding.
   private roles = new Map<number, 'comet' | 'well'>();
   private cursors: Mesh[] = [];
+  private perf = new PerfRecorder();
+  private perfShown = 0;
+  private rawPrev = { x: 0, z: 0 };
   // One entry per generated body, in level order, so moving bodies can be re-posed each frame.
   private bodyViews: { body: Body; view: Group | Mesh; light: Vector3 | null }[] = [];
   private primary: Body | null = null;
@@ -246,6 +252,8 @@ export class OrrerySystem extends createSystem({
           this.placeIn = 0.6; // let the head pose settle before placing the board
         }
         if (state === VisibilityState.NonImmersive) {
+          this.perf.save();
+          this.showPerf();
           this.root.position.set(0, 0.85, -0.55);
           this.root.rotation.y = 0;
           this.snapWindow = 0;
@@ -254,6 +262,7 @@ export class OrrerySystem extends createSystem({
     );
 
     initTuning();
+    this.showPerf();
     this.save = openDay(loadSave(), dayNumber());
     this.loadLevel();
     this.initDesktop();
@@ -273,6 +282,7 @@ export class OrrerySystem extends createSystem({
         misses: this.misses,
         hint: this.hintRing.visible,
         render: { ...this.world.renderer.info.render },
+        perf: this.perf.report(),
         periapsis: this.periapsis,
         topSpeed: this.topSpeed,
         t: this.shot.t,
@@ -625,7 +635,11 @@ export class OrrerySystem extends createSystem({
         if (!onBoard || Math.hypot(x - l.x, z - l.z) < 0.05) continue;
         this.wellHand = side;
       }
-      if (this.wellHand === side) this.moveWell(x, z);
+      // Fingertips are the noisiest tracked point, so a planted well follows them with a little lag.
+      if (this.wellHand === side) {
+        const k = this.hand.gm > 0 ? 0.35 : 1;
+        this.moveWell(this.hand.x + (x - this.hand.x) * k, this.hand.z + (z - this.hand.z) * k);
+      }
     }
   }
 
@@ -777,6 +791,7 @@ export class OrrerySystem extends createSystem({
     this.perfClock += delta;
     if (this.perfClock > 3 && this.frameAvg > 1 / 55) {
       this.quality++;
+      this.perf.quality = this.quality;
       this.perfClock = 0;
       this.refreshOcclusion();
     }
@@ -823,7 +838,10 @@ export class OrrerySystem extends createSystem({
     const before = this.desk.length;
     // Two-scan agreement: adopt an object only if the last scan, or the current
     // desk, already had one there. Depth noise rarely repeats in one spot.
-    const seen = clusterDesk(samples, surface);
+    // The desk reports its own depth noise; the height an object must clear rises with it.
+    const noise = deskNoise(samples, surface);
+    this.perf.depthNoise = noise;
+    const seen = clusterDesk(samples, surface, objectThreshold(noise));
     this.desk = confirmDesk([...this.lastSeen, ...this.desk], seen);
     if (seen.length > this.desk.length) this.scanIn = 0.4; // unconfirmed candidates: look again
     this.lastSeen = seen;
@@ -905,7 +923,8 @@ export class OrrerySystem extends createSystem({
     g.font = '600 34px system-ui, sans-serif';
     const n = this.save.index;
     const where = n < LEVELS_PER_DAY ? `LEVEL ${n + 1} OF ${LEVELS_PER_DAY}` : `ENCORE ${n - LEVELS_PER_DAY + 1}`;
-    g.fillText(`PERIHELION   ·   ${where}`, 512, 62);
+    const fps = PARAMS.get('perf') === '1' && this.perf.fps ? `   ·   ${Math.round(this.perf.fps)} FPS` : '';
+    g.fillText(`PERIHELION   ·   ${where}${fps}`, 512, 62);
     g.fillStyle = '#ffffff';
     g.font = '600 58px system-ui, sans-serif';
     g.fillText(message, 512, 150, 960);
@@ -968,6 +987,8 @@ export class OrrerySystem extends createSystem({
     if (this.phase !== 'drag') return;
     // Launch from the smoothed pull the preview was drawn from, not the raw last frame.
     const { px, pz } = this.aim;
+    const l = this.level.launcher;
+    this.perf.release(Math.hypot(this.comet.position.x - l.x - px, this.comet.position.z - l.z - pz));
     if (Math.hypot(px, pz) < MIN_PULL) {
       this.resetComet(); // a tap, not a pull
       return;
@@ -1074,6 +1095,13 @@ export class OrrerySystem extends createSystem({
     this.aim.px += (this.comet.position.x - l.x - this.aim.px) * k;
     this.aim.pz += (this.comet.position.z - l.z - this.aim.pz) * k;
     const { px, pz } = this.aim;
+    // Self-measurement: while the hand is nearly still, how far does it wobble from its smoothed position?
+    const rawX = this.comet.position.x;
+    const rawZ = this.comet.position.z;
+    const speed = Math.hypot(rawX - this.rawPrev.x, rawZ - this.rawPrev.z) / Math.max(delta, 1e-3);
+    this.rawPrev.x = rawX;
+    this.rawPrev.z = rawZ;
+    if (speed < 0.05 && Math.hypot(px, pz) > MIN_PULL) this.perf.hold(Math.hypot(rawX - l.x - px, rawZ - l.z - pz));
     const pull = Math.min(1, Math.hypot(px, pz) / MAX_PULL);
 
     this.bandPos.set([l.x, PLAY_Y, l.z, this.comet.position.x, this.comet.position.y, this.comet.position.z]);
@@ -1105,6 +1133,7 @@ export class OrrerySystem extends createSystem({
   }
 
   update(delta: number): void {
+    const started = performance.now();
     const visibility = this.world.visibilityState.peek();
     if (visibility === VisibilityState.VisibleBlurred) return; // system menu open: pause
 
@@ -1189,5 +1218,22 @@ export class OrrerySystem extends createSystem({
         if (this.timer > 0.6) this.resetComet();
         break;
     }
+
+    if (visibility === VisibilityState.Visible) {
+      const session = this.xrManager.getSession() as (XRSession & { frameRate?: number }) | null;
+      this.perf.targetFps = session?.frameRate ?? 0;
+      this.perf.frame(delta, performance.now() - started);
+      // `?perf=1`: live frame rate on the HUD, refreshed every two seconds.
+      if (PARAMS.get('perf') === '1' && this.clock - this.perfShown > 2) {
+        this.perfShown = this.clock;
+        this.say(this.message);
+      }
+    }
+  }
+
+  /** Put the last session's self-measurement on the page, where a tester can screenshot it. */
+  private showPerf(): void {
+    const el = document.getElementById('perf-line');
+    if (el) el.textContent = PerfRecorder.line(PerfRecorder.last());
   }
 }
