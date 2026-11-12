@@ -28,6 +28,11 @@ was verified in the IWSDK browser emulator (Quest 3 profile, emulated hands, syn
 | 17 | [Hands read as desk objects](#17-hands-read-as-desk-objects) | Discard probes under a hand |
 | 18 | [Real objects can make a level impossible](#18-real-objects-can-make-a-level-impossible) | Re-solve and ask the player to move something |
 | 19 | [Deployment details](#19-deployment-details) | Explicit Vercel scope, relative asset paths |
+| 20 | [Moving bodies vs a provable level](#20-moving-bodies-vs-a-provable-level) | Time advances only while the comet flies |
+| 21 | [Moons almost never appeared](#21-moons-almost-never-appeared) | Construct the orbit, then prefer moon layouts |
+| 22 | [A black hole without ray tracing](#22-a-black-hole-without-ray-tracing) | Three cheap layers that read as one |
+| 23 | [Slow motion without breaking determinism](#23-slow-motion-without-breaking-determinism) | Scale time fed to the fixed step |
+| 24 | [No way to measure frame rate](#24-no-way-to-measure-frame-rate) | The app governs itself |
 
 ---
 
@@ -258,6 +263,69 @@ aiming preview and the onboarding ghost use the same combined field.
 - `perihelion.vercel.app` belongs to someone else; the production alias is `perihelion-three.vercel.app`.
 - Vite is configured with `base: './'`, so the same build works from any path.
 
+## 20. Moving bodies vs a provable level
+
+**Problem.** Orbiting moons make gravity assists possible, but if moons run on wall-clock time the outcome
+of a shot depends on the instant of release. The solver cannot prove a level solvable, and two players get
+different puzzles from the same seed.
+
+**What we did.** Made it a rule: the sky moves only while the comet flies. `step()` poses every orbiting
+body from the shot's own elapsed time, and the sky rewinds when the comet resets. Solver, aiming preview
+and live flight all see the same moving field. The moon's track is drawn so its future position can be
+judged before firing.
+
+**Verified.** `npm test` checks each orbit starts at its stored position, closes after one period, and
+never sweeps over the pad or the ring. Live: today's third level (black hole, moon, planet) was cleared by
+the solver's launch.
+
+## 21. Moons almost never appeared
+
+**Problem.** First attempt turned an already-placed planet into a moon if its circle happened to be clear.
+Over 120 test levels that produced **1** moon. A second attempt, drawing a fresh radius 16 times, produced
+**9**: most accepted layouts simply had no room.
+
+**What we did.** Two changes. The moon is now *constructed*: pick a radius that keeps the whole circle on
+the board and clear of pad, ring and the other planet, then place the moon on it. And on hard levels the
+generator skips layouts without a moon for the first 45 attempts before settling for a static sky. Skipped
+layouts never reach the solver, so the search stays cheap.
+
+**Verified.** 35 of the 60 hard levels in the test window now have a moon; all 120 are still solvable.
+The test asserts a floor of 10 so a regression is caught.
+
+## 22. A black hole without ray tracing
+
+**Problem.** The film look (bent light around a dark sphere) is gravitational lensing, a ray-traced effect.
+A full-screen distortion pass is exactly the kind of post-processing ruled out in [#7](#7-bloom-is-not-affordable-on-quest),
+and in passthrough there is no rendered background to distort.
+
+**What we did.** Three cheap layers: a black sphere (alpha 1, so it truly blots out the room), a flat ring
+mesh with a shader for the disc (Keplerian shear, `r^-3/4` temperature colour, one Doppler-bright side),
+and one billboard sprite for the photon ring. The grid well under it does the rest. `docs/PHYSICS.md`
+states plainly that this is painted, not simulated.
+
+## 23. Slow motion without breaking determinism
+
+**Problem.** A slow-motion close pass is the cinematic beat we wanted, but changing the time step near the
+primary would change the path and void the solver's proof.
+
+**What we did.** The step never changes. The runtime scales how much frame time it feeds the accumulator
+(down to 30% near the primary), so fewer fixed steps run per frame. Same steps, same path, slower playback.
+
+**Verified.** Live sample on a black-hole level: 0.61 s of wall time advanced the shot by 0.43 s, and the
+solver's launch still hit.
+
+## 24. No way to measure frame rate
+
+**Problem.** The competition expects 60 fps on Quest hardware, and this build has never run on one. The
+costliest addition is soft real-world occlusion: 13 depth samples per fragment.
+
+**What we did.** A governor in `OrrerySystem`. While immersive it keeps a running average of frame time;
+if that stays above 1/55 s for three seconds it steps occlusion from 13 taps to 1, and three seconds later
+to off. It only ever steps down, so there is no oscillation.
+
+**Trade-off.** In the headless emulator, which is slow, the governor fires. That is expected and does not
+reflect device performance either way.
+
 ---
 
 ## Open risks
@@ -266,7 +334,8 @@ Only a headset can close these.
 
 | Risk | Why it is open | Escape hatch |
 |---|---|---|
-| Frame rate under 60 fps | Never profiled on device. Costs added late: 13-tap soft occlusion on the grid, three noise shaders | `?occlusion=hard` (1 tap) or `?occlusion=0` |
+| Frame rate under 60 fps | Never profiled on device. The governor (#24) sheds occlusion cost automatically, but the noise shaders and the grid are fixed costs | `?occlusion=hard` (1 tap) or `?occlusion=0` |
+| Slow motion feels sluggish | Tuned without playing it | `timeScale` floor (0.3) in `OrrerySystem.update` |
 | Depth noise creates phantom objects | Emulator depth is clean | Thresholds in `src/sim.ts`; `?desk=0` |
 | Too many hit-test sources | Browser limit unknown | `BATCH` in `src/desk.ts` |
 | Pinch feel and hand-gravity strength | Tuned by reading state, not by feel | `HAND_GM`, grab radius |

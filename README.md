@@ -7,9 +7,13 @@ around a star and its planets into the ring.
 - **Built for:** Meta VR Start Developer Competition 2026 — Gaming track, New Experience
 - **Built with:** [Immersive Web SDK](https://developers.meta.com/horizon/documentation/iwsdk/guides/overview/) 1.1 (WebXR, Three.js, ECS), TypeScript, Vite
 
-| Aiming | In flight | A real cup with gravity |
-|---|---|---|
-| ![Aiming](docs/screens/aim-emulator.png) | ![In flight](docs/screens/flight-emulator.png) | ![Desk object](docs/screens/desk-object-emulator.png) |
+| Black hole, moon on its track | A real cup with gravity |
+|---|---|
+| ![Black hole level](docs/screens/black-hole-emulator.png) | ![Desk object](docs/screens/desk-object-emulator.png) |
+
+| Aiming | In flight |
+|---|---|
+| ![Aiming](docs/screens/aim-emulator.png) | ![In flight](docs/screens/flight-emulator.png) |
 
 <sub>All frames are from the IWSDK browser emulator (Quest 3 profile, emulated hands, synthetic living room).
 They are not headset captures.</sub>
@@ -24,6 +28,7 @@ They are not headset captures.</sub>
 - [Run, test, deploy](#run-test-deploy)
 - [Competition requirements](#competition-requirements)
 - [Limitations](#limitations)
+- [The physics](docs/PHYSICS.md): what is simulated, what is real, what is stage craft
 - [Engineering log](docs/ENGINEERING.md): every problem we hit and how it was solved
 - [Build log](#build-log)
 
@@ -35,6 +40,12 @@ They are not headset captures.</sub>
   Pinch the amber puck on the rim to drag the board somewhere else.
 - **Readable physics.** The grid under the planets sinks where gravity is strong. A dotted line shows the
   start of your shot: long on the first level, short afterwards.
+- **A sky that moves when you do.** On the hardest level a moon orbits the primary at Kepler speed, but
+  only while the comet is flying. Swing behind it for a real gravity assist.
+- **Black holes.** Some levels trade the star for a black hole: nearly twice the pull inside a horizon the
+  size of a marble, with an accretion disc and photon ring.
+- **The slingshot, in slow motion.** Time slows as the comet makes its closest pass, then the HUD reports
+  the perihelion distance and top speed. Your closest winning pass is a personal record.
 - **Your other hand has gravity.** While the comet is flying, pinch the air over the board: that hand becomes
   a gravity well you can move, and the grid sinks under it. Every level can be solved without it, so
   one-handed play always works; a day cleared with no hand gravity earns a gold light.
@@ -233,6 +244,10 @@ flowchart LR
   integrated with semi-implicit Euler at a fixed `DT = 1/120 s`.
 - Launch speed is `5 m/s` per meter of pull, pull clamped to 10 cm, so the fastest shot is 0.5 m/s and a
   board crossing takes about a second.
+- Orbiting bodies are posed from the shot's elapsed time inside `step()`, so solver, preview and flight
+  agree on where a moon is.
+- Near the primary the runtime feeds less frame time to the accumulator (slow motion). The steps, and so
+  the path, are unchanged.
 - A shot ends on `hit` (inside the 2.2 cm ring), `crash` (inside a body), or `lost` (8 cm past the rim, or 6 s).
 - The runtime accumulates frame time and advances in whole `DT` steps, capped at 0.1 s per frame. The solver
   uses the same `step()`, so any launch the solver found replays exactly in the game at any frame rate.
@@ -243,9 +258,11 @@ flowchart LR
 |---|---|---|---|
 | 1 | 1 (a star) | may work | 25 or more |
 | 2 | 2 | blocked | 6 to 70 |
-| 3 and encore | 3 | blocked | 3 to 45 |
+| 3 and encore | 3, one usually a moon in orbit | blocked | 3 to 45 |
 
-The heaviest body in a level is drawn as the star; the others are planets lit from it.
+The heaviest body is the primary: a star, or on levels 2 and up a black hole 40% of the time. Other
+bodies are planets lit from it. Moons move only while the comet flies, so levels stay deterministic; see
+[the physics](docs/PHYSICS.md).
 
 ### Day and streak
 
@@ -319,7 +336,7 @@ flight freezes and continues afterwards.
 
 ### Debug hook
 
-`window.__perihelion` exposes `state()`, `shoot(px, pz)`, `solve()`, `desk()`, `place()`, `scan()`, `lastScan()` and `feed(samples)`. The live test scripts use it. It
+`window.__perihelion` exposes `state()`, `shoot(px, pz)`, `solve()`, `desk()`, `place()`, `scan()`, `lastScan()`, `feed(samples)` and `load(day, index)`. The live test scripts use it. It
 does not change game rules.
 
 ## Visual effects
@@ -333,10 +350,13 @@ Nothing is loaded from disk: every surface is a shader or a canvas texture.
 | Star | Two animated noise fields for granulation and flares, with limb darkening. The corona is a billboard sprite. |
 | Gravity grid | An 88 x 88 plane whose vertices sink by the same `gm / r` potential the sim integrates. Grid lines are anti-aliased with `fwidth`. A hit sends one ripple out from the ring. |
 | Comet | Two tails, as on a real comet: dust lags along the path, ions blow straight away from the star and strengthen near it. |
+| Black hole | Black horizon sphere, flat disc shader with Keplerian shear, `r^-3/4` temperature colour and a Doppler-bright side, plus a billboard photon ring. Painted, not ray-traced. |
 | Bursts | Launch sparks, crash debris and the win burst all come from one pool of 384 points that never allocates. |
 
 Choices made for Quest hardware:
 
+- **Self-governing frame rate.** If frames average under 55 fps for three seconds, real-world occlusion
+  steps from 13 depth taps to 1, then off.
 - **No post-processing.** Meta's guidance is that true bloom is too expensive on mobile VR and that
   billboarded blob sprites get close, so every glow here is an additive sprite.
 - **Little transparent overdraw.** Particles are small points; the grid is the only large transparent surface.
@@ -401,7 +421,7 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 | Purposeful passthrough | The board sits on the real desk at its measured height; real objects on it and the player's own hand are bodies in the simulation; real things occlude virtual ones. Turn passthrough off and the puzzle is a different puzzle. |
 | Holds up in untested rooms | Height comes from live depth, not only stored planes; no room setup is needed for the scan; every real-world feature degrades to off if its session feature is missing. |
 | Accessible by default | Every level is solvable with one hand and one gesture; the second hand is optional. |
-| Reason to come back | New seeded set each local day, streak, shots-to-finish for the day, a rim of lights that grows per day and rewards clean clears. |
+| Reason to come back | New seeded set each local day, streak, shots-to-finish for the day, a rim of lights that grows per day and rewards clean clears, and a closest-pass record to beat. |
 
 ## Limitations
 
@@ -431,3 +451,5 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Depth occlusion for all materials including custom shaders.
 - Desk scan: real objects become gravity bodies; board height corrected from live depth.
 - Engineering log written.
+- Orbiting moons, black holes, slow-motion passes, perihelion telemetry, frame-rate governor.
+- Physics explainer written.
