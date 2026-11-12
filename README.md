@@ -34,8 +34,13 @@ They are not headset captures.</sub>
   Pinch the amber puck on the rim to drag the board somewhere else.
 - **Readable physics.** The grid under the planets sinks where gravity is strong. A dotted line shows the
   start of your shot: long on the first level, short afterwards.
+- **Your other hand has gravity.** While the comet is flying, pinch the air over the board: that hand becomes
+  a gravity well you can move, and the grid sinks under it. Every level can be solved without it, so
+  one-handed play always works; a day cleared with no hand gravity earns a gold light.
+- **Shown, not told.** Before your first shot a ghost performs one winning pull and release on a loop.
 - **Three puzzles a day.** The same three skies for everyone, easy to hard. Finish them to grow your streak;
-  miss a day and it resets. Encore levels follow.
+  miss a day and it resets. Each day of the streak adds a light to the far rim (gold for a clean day, blue
+  otherwise, up to 30). Encore levels follow.
 
 ## Architecture
 
@@ -115,6 +120,10 @@ sequenceDiagram
         O->>S: step(level, shot)
         S-->>O: flying / hit / crash / lost
         O->>V: trail, dust and ion tail
+        opt other hand pinching over the board
+            O->>S: hand added as a body (r = 0, 2 cm softening)
+            O->>V: violet orb, grid sinks under the hand
+        end
     end
     alt hit
         O->>S: clearLevel(save)
@@ -203,7 +212,8 @@ The heaviest body in a level is drawn as the star; the others are planets lit fr
 - The day number is the local calendar date, so a new set appears at local midnight.
 - `openDay` resets progress on a new day and zeroes the streak if a day was skipped.
 - `clearLevel` adds one to the streak the first time the third level is cleared that day.
-- Save shape (`localStorage["perihelion.v1"]`): `{ lastDay, streak, day, index, shots, todayShots }`.
+- Save shape (`localStorage["perihelion.v1"]`): `{ lastDay, streak, day, index, shots, todayShots, nudged, log }`.
+  `log` holds one entry per day of the current streak (1 = cleared, 2 = cleared without hand gravity).
   If storage is blocked the game still runs, without persistence.
 
 ### Hand interaction
@@ -212,6 +222,22 @@ The heaviest body in a level is drawn as the star; the others are planets lit fr
   default, and a controller squeeze works too, so no controller is required and none is excluded.
 - The comet's grab volume (2.8 cm radius) is larger than its visible core, so a loose pinch still catches it.
 - The pull vector is read in board space, so it stays correct after the board is moved or turned.
+
+### Hand gravity
+
+- During the `fly` phase, a hand whose pinch is held (`gamepads[side].getSelecting()`) within 10 cm of the
+  board edge and 25 cm of the play plane is projected into board space from its index tip.
+- It joins the flight as an extra body with `gm = 0.006` (a mid-sized planet), no crash radius, and a 2 cm
+  softening so a comet passing through the fingers is not flung away.
+- The solver never sees the hand. Levels are accepted on the bodies alone, so the hand is an aid, not a
+  requirement. Using it sets `nudged` for the day, which decides the colour of that day's rim light.
+
+### Onboarding ghost
+
+On the first level, until the first shot of the day, the system takes one launch from the solver, records
+its path, and loops a 3.4 s demo: a cue closes on the comet like a pinch, a ghost comet is pulled back along
+that launch with the band drawn, then the ghost flies the recorded path into the ring. Grabbing the comet
+hides it.
 
 ### Desk placement
 
@@ -280,6 +306,7 @@ the next day and a skipped day.
 ```bash
 npx @iwsdk/cli dev up --allow-browser-automation
 npx @iwsdk/cli browser run test/live.hook.mjs    # miss, three wins, streak, persistence
+npx @iwsdk/cli browser run test/live.nudge.mjs   # with an emulated hand pinching over the board: hand gravity is live
 ```
 
 The real input path is exercised with an emulated hand:
@@ -309,8 +336,9 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 | Seated, two-foot radius | 54 cm board placed 45 cm ahead; the pull is at most 10 cm. |
 | A complete moment in under ten minutes | Three daily levels; each shot resolves in at most 6 s. |
 | Original, not a wrapper | No third-party service. No network calls after the page loads. |
-| Purposeful passthrough | The board sits on the player's real desk and is reached for like an object on it. |
-| Reason to come back | New seeded set each local day, streak, shots-to-finish for the day. |
+| Purposeful passthrough | The board sits on the player's real desk, and the player's own hand, seen in passthrough, is a body in the simulation. |
+| Accessible by default | Every level is solvable with one hand and one gesture; the second hand is optional. |
+| Reason to come back | New seeded set each local day, streak, shots-to-finish for the day, a rim of lights that grows per day and rewards clean clears. |
 
 ## Limitations
 
@@ -320,7 +348,9 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Frame rate has not been profiled. The 60 fps minimum is a target, not a measurement.
 - The streak is stored per browser. Clearing site data resets it; there is no account or leaderboard.
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
-- No accessibility options yet (no voice alternative, no high-contrast mode).
+- Hand gravity is verified with an emulated pinch only; how it feels with real tracking jitter is unknown.
+- Real-world depth occlusion is not enabled, so virtual objects draw over real hands and objects.
+- No voice alternative or high-contrast mode yet.
 
 ## Build log
 
@@ -331,3 +361,4 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Live verification in the emulator: hook scenario and emulated hand pinch.
 - `vfx.ts`: shader planets, star, gravity grid, comet tails, bursts; passthrough alpha fix.
 - Deployed to Vercel.
+- Hand gravity, onboarding ghost and streak lights.

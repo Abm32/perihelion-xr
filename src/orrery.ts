@@ -31,7 +31,9 @@ import { BoardHandle, Comet } from './game-components.js';
 import { resumeAudio, sfx } from './sfx.js';
 import { makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
+  Body,
   BOARD_R,
+  HAND_GM,
   clearLevel,
   dayNumber,
   DT,
@@ -117,6 +119,20 @@ export class OrrerySystem extends createSystem({
   private particles = new Particles();
   private timeUniforms: { value: number }[] = [];
   private star = { x: 0, z: 0 }; // heaviest body: lights the planets, blows the comet tail
+  // The player's other hand: a gravity well while it pinches during a flight.
+  private hand: Body = { x: 0, z: 0, r: 0, gm: 0, hue: 0 };
+  private handOrb!: Sprite;
+  private live!: Level; // level plus the hand, used for the real flight only
+  private logLights = new Group();
+  // First-level demo: a ghost performs one winning pull, then the ghost comet flies it.
+  private ghost = new Group();
+  private ghostDot!: Mesh;
+  private ghostCue!: Sprite;
+  private ghostBand!: Line;
+  private ghostBandPos = new Float32Array(6);
+  private ghostPull = { px: 0, pz: 0 };
+  private ghostPath = new Float32Array(240 * 2);
+  private ghostN = 0;
 
   private save: Save = EMPTY_SAVE;
   private level!: Level;
@@ -205,6 +221,8 @@ export class OrrerySystem extends createSystem({
         message: this.message,
         board: this.root.position.toArray(),
         yaw: this.root.rotation.y,
+        hand: { ...this.hand },
+        ghost: this.ghost.visible,
         comet: this.comet.getWorldPosition(new Vector3()).toArray(),
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
@@ -289,6 +307,25 @@ export class OrrerySystem extends createSystem({
     hud.position.set(0, 0.15, -BOARD_R - 0.03);
     hud.rotation.x = -0.45; // tilt up toward a seated player's eyes
 
+    this.handOrb = this.halo(0xc59bff, 0.09);
+    this.handOrb.visible = false;
+
+    this.ghostDot = new Mesh(
+      this.unitSphere,
+      new MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }),
+    );
+    this.ghostDot.scale.setScalar(0.011);
+    this.ghostCue = this.halo(0xffffff, 0.06);
+    const ghostGeo = new BufferGeometry();
+    ghostGeo.setAttribute('position', new BufferAttribute(this.ghostBandPos, 3));
+    this.ghostBand = new Line(
+      ghostGeo,
+      new LineBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0.6 }),
+    );
+    this.ghostBand.frustumCulled = false;
+    this.ghost.add(this.ghostDot, this.ghostCue, this.ghostBand);
+    this.ghost.visible = false;
+
     this.root.add(
       this.grid.mesh,
       rim,
@@ -299,6 +336,9 @@ export class OrrerySystem extends createSystem({
       this.preview,
       this.band,
       this.shotMesh,
+      this.handOrb,
+      this.logLights,
+      this.ghost,
       hud,
     );
   }
@@ -312,6 +352,9 @@ export class OrrerySystem extends createSystem({
     this.levelGroup.clear();
     this.timeUniforms.length = 0;
     this.level = levelFor(this.save.day, this.save.index);
+    this.live = { ...this.level, bodies: [...this.level.bodies, this.hand] };
+    this.buildGhost();
+    this.buildLog();
 
     const bodies = this.level.bodies;
     const heaviest = bodies.reduce((a, b) => (b.gm > a.gm ? b : a), bodies[0]);
@@ -358,17 +401,118 @@ export class OrrerySystem extends createSystem({
         ? 'Pinch the comet. Pull back. Let go.'
         : this.save.index >= LEVELS_PER_DAY
           ? 'Encore. A new sky tomorrow.'
-          : 'Bend it into the ring.',
+          : this.save.index === 1
+            ? 'Mid-flight, pinch the air. Your hand has gravity.'
+            : 'Bend it into the ring.',
     );
   }
 
   private resetComet(): void {
     this.phase = 'aim';
+    this.releaseHand();
     this.comet.visible = true;
     this.comet.position.set(this.level.launcher.x, PLAY_Y, this.level.launcher.z);
     this.shotMesh.visible = false;
     this.band.visible = false;
     this.preview.geometry.setDrawRange(0, 0);
+  }
+
+  // ---- onboarding ghost, streak lights, hand gravity ------------------------
+
+  /** Only before the very first shot of the day: precompute one winning pull and its path. */
+  private buildGhost(): void {
+    this.ghostN = 0;
+    this.ghost.visible = false;
+    if (this.save.index !== 0 || this.save.shots !== 0) return;
+    const best = solve(this.level).best;
+    if (!best) return;
+    this.ghostPull = best;
+    const s = launch(this.level, best.px, best.pz);
+    let o: Outcome = 'flying';
+    for (let i = 0; o === 'flying' && this.ghostN < 240; i++) {
+      o = step(this.level, s);
+      if (i % 3 === 0) {
+        this.ghostPath[this.ghostN * 2] = s.x;
+        this.ghostPath[this.ghostN * 2 + 1] = s.z;
+        this.ghostN++;
+      }
+    }
+  }
+
+  /** Loop: pinch cue closes on the comet, ghost pulls back, lets go, ghost comet flies to the ring. */
+  private updateGhost(delta: number): void {
+    if (this.ghostN === 0 || this.save.shots > 0) {
+      this.ghost.visible = false;
+      return;
+    }
+    this.ghost.visible = true;
+    this.timer = (this.timer + delta) % 3.4;
+    const t = this.timer;
+    const l = this.level.launcher;
+    const pull = Math.min(1, Math.max(0, (t - 0.6) / 1.0));
+    const ease = pull * pull * (3 - 2 * pull);
+    const gx = l.x + this.ghostPull.px * ease;
+    const gz = l.z + this.ghostPull.pz * ease;
+    const flying = t > 1.9;
+    this.ghostCue.visible = !flying;
+    this.ghostCue.position.set(gx, PLAY_Y, gz);
+    this.ghostCue.scale.setScalar(0.09 - 0.05 * Math.min(1, t / 0.6)); // closes like a pinch
+    this.ghostBand.visible = !flying && t > 0.6;
+    this.ghostBandPos.set([l.x, PLAY_Y, l.z, gx, PLAY_Y, gz]);
+    this.ghostBand.geometry.attributes.position.needsUpdate = true;
+    if (flying) {
+      const i = Math.min(this.ghostN - 1, Math.floor(((t - 1.9) / 1.5) * this.ghostN));
+      this.ghostDot.position.set(this.ghostPath[i * 2], PLAY_Y, this.ghostPath[i * 2 + 1]);
+    } else {
+      this.ghostDot.position.set(gx, PLAY_Y, gz);
+    }
+  }
+
+  /** Lights on the far rim: one per day of the streak, gold when cleared without hand gravity. */
+  private buildLog(): void {
+    this.logLights.traverse((o) => ((o as Mesh).material as MeshBasicMaterial | undefined)?.dispose?.());
+    this.logLights.clear();
+    const log = this.save.log;
+    log.forEach((kind, i) => {
+      const a = -Math.PI / 2 + (i - (log.length - 1) / 2) * 0.075;
+      const light = new Mesh(
+        this.unitSphere,
+        new MeshBasicMaterial({ color: kind === 2 ? 0xffd76b : 0x6fb7ff }),
+      );
+      light.scale.setScalar(0.0045);
+      light.position.set(Math.cos(a) * (BOARD_R + 0.048), PLAY_Y - 0.004, Math.sin(a) * (BOARD_R + 0.048));
+      this.logLights.add(light);
+    });
+  }
+
+  /** During a flight, a pinch held over the board turns that hand into a gravity well. */
+  private updateHand(): void {
+    const pads = this.input.xr.gamepads;
+    let active = false;
+    for (const side of ['left', 'right'] as const) {
+      if (!pads?.[side]?.getSelecting()) continue;
+      this.player.indexTipSpaces[side].getWorldPosition(this.v1);
+      this.root.worldToLocal(this.v1);
+      if (Math.hypot(this.v1.x, this.v1.z) > BOARD_R + 0.1 || Math.abs(this.v1.y - PLAY_Y) > 0.25) continue;
+      this.hand.x = this.v1.x;
+      this.hand.z = this.v1.z;
+      active = true;
+      break;
+    }
+    if (active && this.hand.gm === 0) {
+      sfx.grab();
+      if (!this.save.nudged) this.save = { ...this.save, nudged: true };
+    }
+    this.hand.gm = active ? HAND_GM : 0;
+    this.handOrb.visible = active;
+    this.handOrb.position.set(this.hand.x, PLAY_Y, this.hand.z);
+    this.grid.uniforms.uBodies.value[3].set(this.hand.x, this.hand.z, this.hand.gm);
+  }
+
+  private releaseHand(): void {
+    this.hand.gm = 0;
+    this.handOrb.visible = false;
+    this.grid.uniforms.uBodies.value[3].set(0, 0, 0);
   }
 
   // ---- HUD ----------------------------------------------------------------
@@ -493,6 +637,7 @@ export class OrrerySystem extends createSystem({
 
   private land(outcome: Outcome): void {
     this.timer = 0;
+    this.releaseHand();
     this.shotMesh.visible = false;
     // The spent trail stays, dimmed, as a reference for the next attempt.
     (this.trail.material as LineBasicMaterial).opacity = 0.35;
@@ -588,18 +733,21 @@ export class OrrerySystem extends createSystem({
     const pulse = 1 + Math.sin(this.clock * 4) * 0.08;
     switch (this.phase) {
       case 'aim':
+        this.updateGhost(delta);
         this.target.scale.setScalar(pulse);
         this.comet.scale.setScalar(0.028 * pulse);
         break;
       case 'drag':
+        this.ghost.visible = false;
         this.updateDrag();
         break;
       case 'fly': {
+        this.updateHand();
         this.acc = Math.min(this.acc + delta, 0.1);
         let outcome: Outcome = 'flying';
         while (this.acc >= DT && outcome === 'flying') {
           this.acc -= DT;
-          outcome = step(this.level, this.shot);
+          outcome = step(this.live, this.shot);
           this.pushTrail();
         }
         this.shotMesh.position.set(this.shot.x, PLAY_Y, this.shot.z);
