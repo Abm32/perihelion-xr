@@ -15,7 +15,8 @@ the path of the comet is honest; the look of a black hole is borrowed from film.
 | [Black hole](#black-hole) | Horizon, sheared disc, Doppler-bright side, photon ring | Real ideas, painted not ray-traced |
 | [Slow motion](#slow-motion) | Time slows on the close pass | Cinematic only |
 | [Frozen sky](#the-frozen-sky) | Bodies move only while the comet flies | Game rule |
-| [Hand and desk gravity](#hands-and-desks) | Your hand and your mug attract the comet | Game rule |
+| [Hand and desk gravity](#hands-and-desks) | Planted wells and your mug attract the comet | Game rule |
+| [Empty sky](#the-empty-sky) | A level with no gravity: straight-line flight until you add a mass | Newton's first law, staged |
 
 ## Newtonian gravity
 
@@ -26,7 +27,7 @@ a = GM * d / (|d|² + ε)^(3/2)
 ```
 
 `d` is the vector from comet to body and `GM` is the body's gravitational parameter. The game stores `GM`
-directly (0.004 to 0.02 m³/s²) because the comet's own mass cancels out of its motion, exactly as it does
+directly (0.004 to 0.02 m³/s², and 0 for the rock of an empty sky) because the comet's own mass cancels out of its motion, exactly as it does
 for real spacecraft.
 
 `ε` is **softening**, a standard trick from N-body astronomy: it stops the force from blowing up at zero
@@ -110,6 +111,13 @@ lets the solver prove each level solvable.
 
 ## Hands and desks
 
-During a flight, a pinched hand over the board is a gravity well, and real objects found on your desk by
-the depth scan are bodies with a crash radius. Their pull is assigned (about a mid-sized planet for a
-hand, scaled by footprint for objects), not measured.
+A pinch over the board plants a gravity well that stays where it is left, and real objects found on your
+desk by the depth scan are bodies with a crash radius. Their pull is assigned (about a mid-sized planet
+for a planted well, scaled by footprint for objects), not measured.
+
+## The empty sky
+
+One level a day has no gravity in it at all. Its rock is massless as far as the comet is concerned, so the
+comet obeys Newton's first law and flies in a straight line into it. That makes the level a clean
+demonstration: nothing curves until you add a mass, and the moment you do, both the grid and the aiming
+line bend.

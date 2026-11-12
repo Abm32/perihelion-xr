@@ -1,15 +1,21 @@
 # Perihelion
 
-**A daily gravity puzzle that lives on your desk.** Pinch the comet, pull back, let go — and bend its path
-around a star and its planets into the ring.
+**You are the gravity.** A daily puzzle that lives on your desk: sling a comet into the ring, and when no
+path exists, make one — pinch the air to plant gravity, or set your coffee mug where a planet should be.
 
 - **Play:** https://perihelion-three.vercel.app (open in the Meta Quest browser, tap *Play on your desk*)
+- **No headset?** The same link plays in a desktop browser with the mouse, or with your real hands over a
+  webcam (`?camera=1`). See [playtesting](docs/PLAYTEST.md).
 - **Built for:** Meta VR Start Developer Competition 2026 — Gaming track, New Experience
 - **Built with:** [Immersive Web SDK](https://developers.meta.com/horizon/documentation/iwsdk/guides/overview/) 1.1 (WebXR, Three.js, ECS), TypeScript, Vite
 
 | Black hole, moon on its track | A real cup with gravity |
 |---|---|
 | ![Black hole level](docs/screens/black-hole-emulator.png) | ![Desk object](docs/screens/desk-object-emulator.png) |
+
+| Empty sky: planted gravity bends the path (desktop play) | Narrowest device view |
+|---|---|
+| ![Empty sky](docs/screens/empty-sky-desktop.png) | ![Glasses field of view](docs/screens/glasses-fov-emulator.png) |
 
 | Aiming | In flight |
 |---|---|
@@ -28,6 +34,7 @@ They are not headset captures.</sub>
 - [Run, test, deploy](#run-test-deploy)
 - [Competition requirements](#competition-requirements)
 - [Limitations](#limitations)
+- [Playtesting without a headset](docs/PLAYTEST.md): simulated players, desktop and webcam play, tuning
 - [The physics](docs/PHYSICS.md): what is simulated, what is real, what is stage craft
 - [Engineering log](docs/ENGINEERING.md): every problem we hit and how it was solved
 - [Build log](#build-log)
@@ -46,9 +53,13 @@ They are not headset captures.</sub>
   size of a marble, with an accretion disc and photon ring.
 - **The slingshot, in slow motion.** Time slows as the comet makes its closest pass, then the HUD reports
   the perihelion distance and top speed. Your closest winning pass is a personal record.
-- **Your other hand has gravity.** While the comet is flying, pinch the air over the board: that hand becomes
-  a gravity well you can move, and the grid sinks under it. Every level can be solved without it, so
-  one-handed play always works; a day cleared with no hand gravity earns a gold light.
+- **Plant gravity with a pinch.** Pinch the air over the board and a gravity well appears under your
+  fingers; the grid sinks and the aiming line bends as you move it. It stays when you let go, can be moved
+  mid-flight, and is thrown away by dragging it off the board. One hand at a time is enough.
+- **The empty sky.** The second level each day has nothing in it that pulls: one dead rock sits on the
+  firing line and the comet flies dead straight into it. There is no solution until you add gravity, with
+  a pinch or with a real object from your desk. Elsewhere planted gravity is optional, and a day cleared
+  without it earns a gold light.
 - **Your desk joins the sky.** The game looks straight down at the desk under the board with depth-based
   hit tests. A mug, a stack of books, anything standing more than 3 cm tall becomes a body with gravity and
   a ring at its base. Move the mug and the puzzle changes.
@@ -114,12 +125,15 @@ flowchart LR
 | `src/sim.ts` | Fixed-step gravity integration, seeded level generator, brute-force solver, day and streak rules, desk-surface and object clustering. Runs unchanged in Node. |
 | `src/orrery.ts` | The one gameplay system. Owns the board, the phase state machine, HUD canvas, desk placement and the debug hook. |
 | `src/vfx.ts` | Shader materials (planet, atmosphere shell, star, gravity grid) and a fixed-size particle pool. |
+| `src/camera-hands.ts` | Webcam hand tracking (MediaPipe) as board pointers, for play without a headset. |
+| `src/tuning.ts` | Feel constants and the `?tune=1` slider panel. |
 | `src/desk.ts` | `DeskScanner`: 85 downward WebXR hit tests in batches of 10, returning real heights under the board. |
 | `src/sfx.ts` | Every sound is one or two oscillators with an envelope. There are no audio files. |
 | `src/panel.ts` | Browser welcome card (UIKitML). Hidden while immersive. |
 | `src/game-components.ts` | Two tag components: `Comet`, `BoardHandle`. |
 | `public/scenes/main.iwsdk.scene.json` | Only the welcome panel. The board is built in code because every level is generated. |
 | `test/sim.check.mjs` | Offline self-check of the sim. |
+| `test/playtest.mjs` | Simulated players with imprecise hands: shots needed and forgiveness per level. |
 | `test/live.*.mjs` | Scripts that drive the running app in the managed emulator. |
 
 ## Workflows
@@ -242,13 +256,16 @@ flowchart LR
 - Board space is meters on the XZ plane, +z toward the player. The comet moves in that plane.
 - Acceleration is the sum over bodies of `gm * d / (|d|^2 + 1e-5)^(3/2)` (softened Newtonian gravity),
   integrated with semi-implicit Euler at a fixed `DT = 1/120 s`.
-- Launch speed is `5 m/s` per meter of pull, pull clamped to 10 cm, so the fastest shot is 0.5 m/s and a
-  board crossing takes about a second.
+- Launch speed is `3.2 m/s` per meter of pull, pull clamped to 16 cm, so the fastest shot is 0.51 m/s and a
+  board crossing takes about a second. The long draw was chosen from the simulated playtest: it makes each
+  millimetre of hand error matter less.
+- The pull is low-pass filtered over 80 ms, and the launch uses the filtered value the preview was drawn
+  from, so the twitch of opening the fingers does not aim the shot.
 - Orbiting bodies are posed from the shot's elapsed time inside `step()`, so solver, preview and flight
   agree on where a moon is.
 - Near the primary the runtime feeds less frame time to the accumulator (slow motion). The steps, and so
   the path, are unchanged.
-- A shot ends on `hit` (inside the 2.2 cm ring), `crash` (inside a body), or `lost` (8 cm past the rim, or 6 s).
+- A shot ends on `hit` (inside the 3 cm ring), `crash` (inside a body), or `lost` (8 cm past the rim, or 6 s).
 - The runtime accumulates frame time and advances in whole `DT` steps, capped at 0.1 s per frame. The solver
   uses the same `step()`, so any launch the solver found replays exactly in the game at any frame rate.
 
@@ -257,8 +274,11 @@ flowchart LR
 | Daily level | Bodies | Straight shot | Solver hits allowed (of 960) |
 |---|---|---|---|
 | 1 | 1 (a star) | may work | 25 or more |
-| 2 | 2 | blocked | 6 to 70 |
-| 3 and encore | 3, one usually a moon in orbit | blocked | 3 to 45 |
+| 2, empty sky | 1 rock with no gravity | blocked, and nothing bends: 0 | 6 or more once gravity is planted at the helper spot |
+| 3 and encore | 3, one usually a moon in orbit | blocked | 6 to 90 |
+
+Every accepted level must also have a *forgiving* answer: a winning launch whose neighbours on the solver
+grid (one step of angle or power either way) win too. Every third encore level is an empty sky.
 
 The heaviest body is the primary: a star, or on levels 2 and up a black hole 40% of the time. Other
 bodies are planets lit from it. Moons move only while the comet flies, so levels stay deterministic; see
@@ -280,14 +300,23 @@ bodies are planets lit from it. Moons move only while the comet flies, so levels
 - The comet's grab volume (2.8 cm radius) is larger than its visible core, so a loose pinch still catches it.
 - The pull vector is read in board space, so it stays correct after the board is moved or turned.
 
-### Hand gravity
+### Planted gravity
 
-- During the `fly` phase, a hand whose pinch is held (`gamepads[side].getSelecting()`) within 10 cm of the
-  board edge and 25 cm of the play plane is projected into board space from its index tip.
-- It joins the flight as an extra body with `gm = 0.006` (a mid-sized planet), no crash radius, and a 2 cm
-  softening so a comet passing through the fingers is not flung away.
-- The level generator never sees the hand. Levels are accepted on their generated bodies alone, so the hand is an aid, not a
-  requirement. Using it sets `nudged` for the day, which decides the colour of that day's rim light.
+- In any phase but the win, a pinch (`gamepads[side].getSelecting()`) over the board plants a well at the
+  index tip, in board space. A pinch within 5 cm of the pad is left to the comet grab, and a hand already
+  holding the comet or the rim puck is ignored (`GrabSystem.getHolderHand`).
+- The well persists after the pinch ends. Pinching again moves it; dragging it 4 cm past the rim removes it.
+- It is a body with `gm = 0.006` (a mid-sized planet), no crash radius, and a 2 cm softening so a comet
+  passing through it is not flung away. The aiming preview and the live flight include it.
+- On ordinary levels the generator never sees it, so it is an aid and costs the day's gold light. On
+  empty-sky levels it is required and costs nothing.
+
+### Empty-sky levels
+
+`generateVoid` places one rock (`gm = 0`) on the firing line. With no gravity anywhere the comet flies
+straight, so the level is checked to have **zero** winning launches. It is then accepted only if a planted
+well at one of four spots beside the rock gives at least six winning launches with a forgiving answer; the
+best spot is stored as `helper` and shown as a hint ring after two misses.
 
 ### Onboarding ghost
 
@@ -303,6 +332,9 @@ hides it.
 - `DeskScanner` never holds more than 10 hit-test sources open and finishes a scan in about a second.
 - `deskSurface` and `clusterDesk` are pure and covered by `npm test`, including a board that overhangs the
   desk edge and a single noisy probe.
+- An object needs two adjacent probes at least 3.5 cm tall, and two scans in a row that agree on where it
+  is. Under simulated depth noise (1.2 cm jitter, 3% outliers of 5 cm) a single scan invents an object
+  about 1 time in 9; requiring agreement brought that to 0 in 300 trials while keeping a real mug in 299.
 - A found body has `r` from its footprint (at most 7 cm), `gm` from its probe count (0.0055 to 0.012), and
   `real: true`. It is not drawn; it gets a ring. The aiming preview, the ghost and the solver all use the
   generated level plus the desk; the hand is added only for the live flight.
@@ -339,7 +371,7 @@ down), every essential element sits inside that:
 |---|---|---|---|
 | Board, left and right edge | ±24.9° | 0° | ±37° |
 | Board, near edge | 0° | −24.6° | −43° |
-| Comet at full pull-back | 0° | −27.2° | −43° |
+| Comet at full pull-back (16 cm) | 0° | −29.9° | −43° |
 | Board, far edge and streak lights | 0° | +12.8° | +25° |
 | HUD, top corners | ±13.7° | about +18° | +25° |
 | Rim puck | +27.7° | −11.4° | ±37° |
@@ -360,9 +392,16 @@ release was run under the glasses profile and launched normally.
 While `visibilityState` is `VisibleBlurred` (system menu open) the system skips its update, so a shot in
 flight freezes and continues afterwards.
 
+### Render cost
+
+Measured with `test/live.render.mjs` (desktop emulator, one view): 22 to 28 draw calls and 22,000 to 32,000
+triangles per frame across the three daily levels. Meta's published guidance for Quest 3 is under 200 draw
+calls and under 1.5 million triangles. Stereo rendering doubles our numbers at most. This is a budget
+check, not a frame-rate measurement; shader cost is not captured by it.
+
 ### Debug hook
 
-`window.__perihelion` exposes `state()`, `shoot(px, pz)`, `solve()`, `desk()`, `place()`, `scan()`, `lastScan()`, `feed(samples)` and `load(day, index)`. The live test scripts use it. It
+`window.__perihelion` exposes `state()`, `shoot(px, pz)`, `solve()`, `desk()`, `place()`, `scan()`, `lastScan()`, `feed(samples)`, `load(day, index)`, `pointer(id, x, z, down)` and `toScreen(x, z)`. The live test scripts use it. It
 does not change game rules.
 
 ## Visual effects
@@ -401,6 +440,7 @@ Needs Node 22.18+ (or 24).
 npm install
 npm run dev          # managed browser with the XR emulator
 npm test             # sim self-check
+npm run playtest     # simulated players: shots needed, forgiveness
 npm run typecheck
 npm run build        # static site in dist/
 ```
@@ -441,12 +481,12 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 | Requirement or guideline | How Perihelion meets it |
 |---|---|
 | Hands-first, end to end | The browser card is tapped with a hand pinch like any web page; inside XR, pinch to play and pinch to move the board. No controller is ever needed. |
-| Seated, two-foot radius | 54 cm board placed 45 cm ahead; the pull is at most 10 cm. |
+| Seated, two-foot radius | 54 cm board placed 45 cm ahead; a full draw is 16 cm and ends 14 cm short of the body. |
 | A complete moment in under ten minutes | Three daily levels; each shot resolves in at most 6 s. |
 | Original, not a wrapper | No third-party service. No network calls after the page loads. |
-| Purposeful passthrough | The board sits on the real desk at its measured height; real objects on it and the player's own hand are bodies in the simulation; real things occlude virtual ones. Turn passthrough off and the puzzle is a different puzzle. |
+| Purposeful passthrough | The board sits on the real desk at its measured height; real objects on it are bodies in the simulation; real things occlude virtual ones. One level a day cannot be solved without gravity the player adds, by hand or with a real object. |
 | Holds up in untested rooms | Height comes from live depth, not only stored planes; no room setup is needed for the scan; every real-world feature degrades to off if its session feature is missing. |
-| Accessible by default | Every level is solvable with one hand and one gesture; the second hand is optional. |
+| Accessible by default | One gesture (pinch), one hand at a time; planted gravity stays put, so nothing needs two hands or fast timing. Playable with a mouse. |
 | Reason to come back | New seeded set each local day, streak, shots-to-finish for the day, a rim of lights that grows per day and rewards clean clears, and a closest-pass record to beat. |
 
 ## Limitations
@@ -459,7 +499,11 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Frame rate has not been profiled. The 60 fps minimum is a target, not a measurement.
 - The streak is stored per browser. Clearing site data resets it; there is no account or leaderboard.
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
-- Hand gravity is verified with an emulated pinch only; how it feels with real tracking jitter is unknown.
+- Planted gravity is verified with an emulated pinch and with a mouse; how it feels with real tracking
+  jitter is unknown.
+- Webcam hand tracking has not been run by us (no camera on the build machine). It shares all game-side
+  code with the tested mouse path.
+- The empty-sky level is the hardest for the simulated player (23% gave up within 15 shots).
 - Depth occlusion and the desk scan are verified against the emulator's clean depth and geometry only.
   Real depth is noisier; thresholds and batch sizes are educated guesses. Escape hatches: `?desk=0`,
   `?occlusion=0`, `?occlusion=hard`.
@@ -482,3 +526,6 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Orbiting moons, black holes, slow-motion passes, perihelion telemetry, frame-rate governor.
 - Physics explainer written.
 - Field-of-view pass with the Meta VR Glasses emulator profile; HUD lowered.
+- Simulated playtest written; draw lengthened, ring widened, forgiving answers required.
+- Planted gravity and empty-sky levels; mouse, webcam and tuning play without a headset.
+- Desk scan hardened against depth noise with two-scan agreement.

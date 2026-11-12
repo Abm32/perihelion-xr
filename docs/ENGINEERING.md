@@ -34,6 +34,12 @@ was verified in the IWSDK browser emulator (Quest 3 profile, emulated hands, syn
 | 23 | [Slow motion without breaking determinism](#23-slow-motion-without-breaking-determinism) | Scale time fed to the fixed step |
 | 24 | [No way to measure frame rate](#24-no-way-to-measure-frame-rate) | The app governs itself |
 | 25 | [Would it fit a narrower headset view?](#25-would-it-fit-a-narrower-headset-view) | Measured against the glasses profile; HUD lowered |
+| 26 | [Correct levels that nobody could win](#26-correct-levels-that-nobody-could-win) | Simulated playtest; longer draw, wider ring, forgiving answers |
+| 27 | [A slingshot is a known genre](#27-a-slingshot-is-a-known-genre) | Empty skies that only the player's gravity can solve |
+| 28 | [Hand gravity needed two hands and fast timing](#28-hand-gravity-needed-two-hands-and-fast-timing) | Planted gravity that stays put |
+| 29 | [No human had ever played it](#29-no-human-had-ever-played-it) | Mouse, webcam hands and live tuning in the browser |
+| 30 | [Depth noise invented desk objects](#30-depth-noise-invented-desk-objects) | Two adjacent probes, two agreeing scans |
+| 31 | [Is the scene within Quest's budget?](#31-is-the-scene-within-quests-budget) | Counted draw calls and triangles |
 
 ---
 
@@ -341,6 +347,94 @@ a 25° limit, so the HUD was lowered 2.5 cm (to about 18°). The widest is the r
 release under the glasses profile launched a shot. The table of angles is in the README.
 **Unproven.** Fit for a player who sits much closer than the default 45 cm.
 
+## 26. Correct levels that nobody could win
+
+**Problem.** Every level was proven solvable, and that proved nothing about people. Feel had been tuned by
+reading numbers.
+
+**What we did.** Wrote `test/playtest.mjs`: a model of a player with imprecise hands (5 mm error per
+release) who aims at the ring, watches the trail, and tries variations. Its first report: level 1 took a
+median of 5 shots, level 3 took 14, and the solver's own answer survived a human release only about 30%
+of the time. The game was too twitchy to enjoy.
+
+The cause was sensitivity. A full draw was 10 cm, so 5 mm of error was 5% of the range. Fixes, each
+re-measured: draw lengthened to 16 cm for the same top speed, ring widened from 2.2 to 3 cm, the solver
+changed to return the most forgiving answer and levels required to have one, the release point smoothed
+over 80 ms, and hints added for anyone stuck.
+
+**Verified.** Level 1: median 1 shot, answer survives 96%. Level 3: median 3 shots, 3% give up. Full
+before-and-after tables are in `docs/PLAYTEST.md`.
+**Unproven.** The 5 mm hand error is an assumption about Quest tracking, not a measurement.
+
+**Side effect caught.** The longer draw reached 10 cm from the player's body. The launch pad moved 4 cm in
+from the rim so a full draw ends 14 cm short.
+
+## 27. A slingshot is a known genre
+
+**Problem.** Scored honestly, the core verb was familiar: pull back, let go, curve around planets.
+Planted gravity and desk objects were optional extras on top of it.
+
+**What we did.** Made the player's gravity the point. One level a day is an empty sky: a single rock with
+no gravity sits on the firing line. With nothing to bend its path the comet flies straight into the rock,
+so the generator can prove the level has no solution at all. It is accepted only if gravity planted at a
+tested spot opens a forgiving path. The player solves it by pinching the air, or by putting something real
+on the desk. The tagline changed with it: *you are the gravity.*
+
+**Verified.** `npm test`: all 30 empty skies in the window have zero straight solutions and six or more
+with gravity at the stored spot. Live: two straight shots fail, the hint appears, planted gravity clears
+the level and does not cost the gold light.
+
+## 28. Hand gravity needed two hands and fast timing
+
+**Problem.** Gravity from a hand existed only while that hand pinched during a flight. A flight to the
+first obstacle lasts about a third of a second, so the launching hand could not get there in time: in
+practice it needed two hands tracked at once, and it could not be aimed with, because the preview never
+showed it.
+
+**What we did.** Gravity is now *planted*. A pinch over the board leaves a well that stays after the hand
+lets go. It can be moved (even mid-flight) and is removed by dragging it off the board. The aiming preview
+includes it, so the line visibly bends as the well moves. A pinch right at the launch pad is left to the
+comet grab, and a hand holding the comet or the rim puck never plants.
+
+**Verified.** Emulated XR pinch: planted, dragged 5 cm, released; `gm` stayed 0.006 at the release point.
+
+## 29. No human had ever played it
+
+**Problem.** Slow-motion strength, well strength and ghost pacing were guesses. The team has no headset.
+
+**What we did.** Made the browser version playable. In a non-immersive page the same rules are driven by
+board-space pointers: the mouse (drag the comet, click to plant gravity) or, with `?camera=1`, real hands
+tracked from the webcam by MediaPipe. `?tune=1` adds sliders for the feel constants, persisted and
+copyable, and ignored unless that flag is present.
+
+**Verified.** A real mouse drag through the canvas cleared level 1 in one shot. The webcam path shares
+that game-side code and its downloads resolve.
+**Unproven.** The webcam tracking loop itself has not been run by us; the build machine has no camera.
+
+## 30. Depth noise invented desk objects
+
+**Problem.** Meta documents the Depth API as low resolution, unreliable under 20 cm, and weak on dark or
+reflective surfaces. Our desk-object thresholds had only ever met the emulator's clean geometry.
+
+**What we did.** Added a noise-injection test: 1.2 cm Gaussian jitter on every probe plus 3% outliers of
+5 cm, on an empty desk and on a desk with a mug. The original rules invented an object in **68%** of empty
+scans. Requiring two adjacent tall probes (and estimating the surface as a mean, not a low percentile)
+cut that to 11%. Requiring two consecutive scans to agree on the position cut it to **0 in 300**, with
+the mug still found in 299 of 300.
+
+**Trade-off.** An object must now be at least about 5 cm wide, and appears one scan later.
+
+## 31. Is the scene within Quest's budget?
+
+**Problem.** Frame rate cannot be measured, but geometry and draw-call load can be counted.
+
+**What we did.** Exposed the renderer's counters and measured each daily level: 22 to 28 draw calls and
+22,000 to 32,000 triangles per view. Meta's guidance for Quest 3 is under 200 draw calls and under
+1.5 million triangles.
+
+**Unproven.** Fragment cost (noise shaders, occlusion taps) is not in those counters. The governor in
+[#24](#24-no-way-to-measure-frame-rate) remains the safeguard for that.
+
 ---
 
 ## Open risks
@@ -353,6 +447,8 @@ Only a headset can close these.
 | Slow motion feels sluggish | Tuned without playing it | `timeScale` floor (0.3) in `OrrerySystem.update` |
 | Depth noise creates phantom objects | Emulator depth is clean | Thresholds in `src/sim.ts`; `?desk=0` |
 | Too many hit-test sources | Browser limit unknown | `BATCH` in `src/desk.ts` |
-| Pinch feel and hand-gravity strength | Tuned by reading state, not by feel | `HAND_GM`, grab radius |
+| Pinch feel and planted-gravity strength | Now playable with mouse or webcam, still not on device | `?tune=1` sliders; `HAND_GM`, grab radius |
+| Planting gravity by accident | Any pinch over the board plants | 5 cm exclusion at the pad; drag off the board to remove |
+| Empty-sky level too hard | Hardest level for the simulated player | Hint ring after 2 misses; real objects also work |
 | Occlusion edges around fingers | Depth map is about 320 px per eye | `?occlusion=0` |
 | Particle size | One hand-tuned constant | `900.0` in the particle shader |
