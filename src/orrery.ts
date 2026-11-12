@@ -29,17 +29,19 @@ import {
   XRPlane,
 } from '@iwsdk/core';
 import { BoardHandle, Comet } from './game-components.js';
+import { startCameraHands } from './camera-hands.js';
 import { DeskScanner } from './desk.js';
 import { resumeAudio, sfx } from './sfx.js';
+import { initTuning, tune } from './tuning.js';
 import { makeBlackHole, makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
   Body,
   bodyPos,
   BOARD_R,
   clusterDesk,
+  confirmDesk,
   DeskSample,
   deskSurface,
-  HAND_GM,
   clearLevel,
   dayNumber,
   DT,
@@ -142,6 +144,15 @@ export class OrrerySystem extends createSystem({
   private lastScan: DeskSample[] = []; // kept for the debug hook
   private scanIn = -1;
   private wasBoardHeld = false;
+  private lastSeen: Body[] = []; // previous scan's candidates, for two-scan agreement
+  private wellHand: 'left' | 'right' | null = null; // XR hand currently dragging the planted well
+  private misses = 0; // on the current level, for hints
+  private hintRing!: Mesh;
+  // Smoothed pull, so the twitch of letting go does not aim the shot.
+  private aim = { px: 0, pz: 0 };
+  // Desktop play (mouse or webcam hands): what each pointer is holding.
+  private roles = new Map<number, 'comet' | 'well'>();
+  private cursors: Mesh[] = [];
   // One entry per generated body, in level order, so moving bodies can be re-posed each frame.
   private bodyViews: { body: Body; view: Group | Mesh; light: Vector3 | null }[] = [];
   private primary: Body | null = null;
@@ -219,6 +230,7 @@ export class OrrerySystem extends createSystem({
         if (this.phase === 'aim') {
           this.phase = 'drag';
           this.lastTick = 0;
+          this.aim.px = this.aim.pz = 0;
           sfx.grab();
         } else {
           this.dropComet = true; // grabbed mid-flight: release it next update
@@ -241,8 +253,10 @@ export class OrrerySystem extends createSystem({
       }),
     );
 
+    initTuning();
     this.save = openDay(loadSave(), dayNumber());
     this.loadLevel();
+    this.initDesktop();
 
     // Debug and verification hook (emulator, tests, demo capture).
     (window as unknown as Record<string, unknown>).__perihelion = {
@@ -256,13 +270,25 @@ export class OrrerySystem extends createSystem({
         hand: { ...this.hand },
         ghost: this.ghost.visible,
         quality: this.quality,
+        misses: this.misses,
+        hint: this.hintRing.visible,
+        render: { ...this.world.renderer.info.render },
         periapsis: this.periapsis,
         topSpeed: this.topSpeed,
         t: this.shot.t,
         comet: this.comet.getWorldPosition(new Vector3()).toArray(),
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
-      solve: () => solve(this.field).best,
+      pointer: (id: number, x: number, z: number, down: boolean) => this.desktopPointer(id, x, z, down),
+      // Board point to canvas client pixels, so a test can aim a real mouse.
+      toScreen: (x: number, z: number) => {
+        const rect = this.world.renderer.domElement.getBoundingClientRect();
+        const v = new Vector3(x, PLAY_Y, z);
+        this.root.localToWorld(v).project(this.world.camera);
+        return [rect.left + ((v.x + 1) / 2) * rect.width, rect.top + ((1 - v.y) / 2) * rect.height];
+      },
+      // With gravity planted, solve the sky the comet will actually fly through.
+      solve: () => solve(this.hand.gm > 0 ? this.live : this.field).best,
       desk: () => this.desk,
       // Jump to any day's level (changes the in-memory save; for capture and tests only).
       load: (day: number, index: number) => {
@@ -357,6 +383,13 @@ export class OrrerySystem extends createSystem({
 
     this.handOrb = this.halo(0xc59bff, 0.09);
     this.handOrb.visible = false;
+    // Shown on an empty-sky level after two misses: a spot where planted gravity works.
+    this.hintRing = new Mesh(
+      new RingGeometry(0.02, 0.023, 48),
+      new MeshBasicMaterial({ color: 0xc59bff, transparent: true, opacity: 0.8 }),
+    );
+    this.hintRing.rotation.x = -Math.PI / 2;
+    this.hintRing.visible = false;
 
     this.ghostDot = new Mesh(
       this.unitSphere,
@@ -385,6 +418,7 @@ export class OrrerySystem extends createSystem({
       this.band,
       this.shotMesh,
       this.handOrb,
+      this.hintRing,
       this.deskRings,
       this.logLights,
       this.ghost,
@@ -401,12 +435,15 @@ export class OrrerySystem extends createSystem({
     this.levelGroup.clear();
     this.timeUniforms.length = 0;
     this.level = levelFor(this.save.day, this.save.index);
+    this.clearWell();
+    this.misses = 0;
+    this.hintRing.visible = false;
     this.rebuildField();
     this.buildLog();
     if (this.world.visibilityState.peek() !== VisibilityState.NonImmersive) this.scanIn = 0.4;
 
     const bodies = this.level.bodies;
-    const primary = bodies.find((b) => b.kind !== 'planet') ?? null;
+    const primary = bodies.find((b) => b.kind === 'star' || b.kind === 'hole') ?? null;
     this.primary = primary;
     this.star = primary ? { x: primary.x, z: primary.z } : { x: 0, z: 0 };
     this.grid.uniforms.uRipple.value.z = -1;
@@ -421,6 +458,13 @@ export class OrrerySystem extends createSystem({
         view = makeStar(b.hue);
         color.setHSL(0.02 + b.hue * 0.12, 1, 0.6);
         view.add(this.halo(color.getHex(), 6)); // corona: sprite, not bloom
+      } else if (b.kind === 'rock') {
+        // Dead rock: grey, airless, lit from above. It blocks; it does not pull.
+        view = makePlanet(b.hue, 0.2, new Vector3(0.3, 1, 0.2).normalize());
+        const u = view.userData.uniforms;
+        u.uBase.value.setHSL(0.08, 0.06, 0.36);
+        u.uAlt.value.setHSL(0.08, 0.04, 0.12);
+        u.uAir.value.setHSL(0.6, 0.05, 0.22);
       } else {
         light = new Vector3(0, 1, 0);
         view = makePlanet(b.hue, (b.gm * 1000) % 1, light);
@@ -465,8 +509,8 @@ export class OrrerySystem extends createSystem({
         ? 'Pinch the comet. Pull back. Let go.'
         : this.save.index >= LEVELS_PER_DAY
           ? 'Encore. A new sky tomorrow.'
-          : this.save.index === 1
-            ? 'Mid-flight, pinch the air. Your hand has gravity.'
+          : this.level.void
+            ? 'Empty sky. Pinch the air to plant gravity.'
             : bodies.some((b) => b.orbit)
               ? 'Time moves only while the comet flies.'
               : primary?.kind === 'hole'
@@ -477,7 +521,6 @@ export class OrrerySystem extends createSystem({
 
   private resetComet(): void {
     this.phase = 'aim';
-    this.releaseHand();
     this.syncBodies(0); // the sky rewinds with the comet
     this.comet.visible = true;
     this.comet.position.set(this.level.launcher.x, PLAY_Y, this.level.launcher.z);
@@ -492,7 +535,9 @@ export class OrrerySystem extends createSystem({
   private buildGhost(): void {
     this.ghostN = 0;
     this.ghost.visible = false;
-    if (this.save.index !== 0 || this.save.shots !== 0) return;
+    const first = this.save.index === 0 && this.save.shots === 0;
+    const mercy = this.misses >= 5 && !this.level.void; // five misses: show one way through
+    if (!first && !mercy) return;
     const best = solve(this.field).best;
     if (!best) return;
     this.ghostPull = best;
@@ -510,13 +555,13 @@ export class OrrerySystem extends createSystem({
 
   /** Loop: pinch cue closes on the comet, ghost pulls back, lets go, ghost comet flies to the ring. */
   private updateGhost(delta: number): void {
-    if (this.ghostN === 0 || this.save.shots > 0) {
+    if (this.ghostN === 0) {
       this.ghost.visible = false;
       return;
     }
     this.ghost.visible = true;
-    this.timer = (this.timer + delta) % 3.4;
-    const t = this.timer;
+    this.timer = (this.timer + delta) % tune.ghostLoop;
+    const t = (this.timer / tune.ghostLoop) * 3.4; // the beats below are written for a 3.4 s loop
     const l = this.level.launcher;
     const pull = Math.min(1, Math.max(0, (t - 0.6) / 1.0));
     const ease = pull * pull * (3 - 2 * pull);
@@ -554,34 +599,159 @@ export class OrrerySystem extends createSystem({
     });
   }
 
-  /** During a flight, a pinch held over the board turns that hand into a gravity well. */
-  private updateHand(): void {
+  /**
+   * Planted gravity. A pinch over the board (not on the comet, not on the rim
+   * puck) plants a gravity well under the fingers. It stays when the hand lets
+   * go, can be pinched again and moved, even mid-flight, and is thrown away by
+   * dragging it off the board. One hand at a time is enough to play.
+   */
+  private updateWell(): void {
+    if (this.phase === 'won') return;
     const pads = this.input.xr.gamepads;
-    let active = false;
+    const grab = this.world.getSystem(GrabSystem);
+    const busy = [grab?.getHolderHand(this.cometEntity), grab?.getHolderHand(this.handleEntity)];
+    const l = this.level.launcher;
     for (const side of ['left', 'right'] as const) {
-      if (!pads?.[side]?.getSelecting()) continue;
+      if (!pads?.[side]?.getSelecting() || busy.includes(side)) {
+        if (this.wellHand === side) this.wellHand = null;
+        continue;
+      }
       this.player.indexTipSpaces[side].getWorldPosition(this.v1);
       this.root.worldToLocal(this.v1);
-      if (Math.hypot(this.v1.x, this.v1.z) > BOARD_R + 0.1 || Math.abs(this.v1.y - PLAY_Y) > 0.25) continue;
-      this.hand.x = this.v1.x;
-      this.hand.z = this.v1.z;
-      active = true;
-      break;
+      const { x, z } = this.v1;
+      if (this.wellHand === null) {
+        const onBoard = Math.hypot(x, z) <= BOARD_R + 0.02 && Math.abs(this.v1.y - PLAY_Y) < 0.25;
+        // A pinch right at the pad is a reach for the comet, not a planting.
+        if (!onBoard || Math.hypot(x - l.x, z - l.z) < 0.05) continue;
+        this.wellHand = side;
+      }
+      if (this.wellHand === side) this.moveWell(x, z);
     }
-    if (active && this.hand.gm === 0) {
-      sfx.grab();
-      if (!this.save.nudged) this.save = { ...this.save, nudged: true };
-    }
-    this.hand.gm = active ? HAND_GM : 0;
-    this.handOrb.visible = active;
-    this.handOrb.position.set(this.hand.x, PLAY_Y, this.hand.z);
-    this.grid.uniforms.uBodies.value[HAND_SLOT].set(this.hand.x, this.hand.z, this.hand.gm);
   }
 
-  private releaseHand(): void {
+  private moveWell(x: number, z: number): void {
+    if (Math.hypot(x, z) > BOARD_R + 0.04) {
+      this.clearWell(); // dragged off the board: thrown away
+      return;
+    }
+    if (this.hand.gm === 0) {
+      sfx.grab();
+      this.hintRing.visible = false;
+      // Empty skies need planted gravity, so only elsewhere does it cost the gold light.
+      if (!this.level.void && !this.save.nudged) this.save = { ...this.save, nudged: true };
+    }
+    this.hand.x = x;
+    this.hand.z = z;
+    this.hand.gm = tune.wellGm;
+    this.handOrb.visible = true;
+    this.handOrb.position.set(x, PLAY_Y, z);
+    this.grid.uniforms.uBodies.value[HAND_SLOT].set(x, z, this.hand.gm);
+  }
+
+  private clearWell(): void {
     this.hand.gm = 0;
+    this.wellHand = null;
     this.handOrb.visible = false;
     this.grid.uniforms.uBodies.value[HAND_SLOT].set(0, 0, 0);
+  }
+
+  // ---- desktop play: mouse and webcam hands -----------------------------------
+
+  /**
+   * One pointer in board space. Pressing on the comet draws it back; pressing
+   * anywhere else on the board plants or moves gravity. Same rules as the
+   * headset, so the feel of a pull can be judged without one.
+   */
+  private desktopPointer(id: number, x: number, z: number, down: boolean, seen = true): void {
+    const cursor = this.cursors[id % this.cursors.length];
+    cursor.visible = seen && id < 2; // the mouse has its own arrow
+    cursor.position.set(x, PLAY_Y + 0.002, z);
+    cursor.scale.setScalar(down ? 0.7 : 1);
+    const role = this.roles.get(id);
+    if (!down) {
+      if (role === 'comet' && this.phase === 'drag') this.onRelease();
+      this.roles.delete(id);
+      return;
+    }
+    if (!role) {
+      const l = this.level.launcher;
+      const cometFree = ![...this.roles.values()].includes('comet');
+      if (this.phase === 'aim' && cometFree && Math.hypot(x - l.x, z - l.z) < 0.045) {
+        this.roles.set(id, 'comet');
+        this.phase = 'drag';
+        this.lastTick = 0;
+        this.aim.px = this.aim.pz = 0;
+        resumeAudio();
+        sfx.grab();
+      } else if (this.phase !== 'won' && Math.hypot(x, z) <= BOARD_R + 0.02) {
+        this.roles.set(id, 'well');
+      } else {
+        return;
+      }
+    }
+    const now = this.roles.get(id);
+    if (now === 'comet' && this.phase === 'drag') this.comet.position.set(x, PLAY_Y, z);
+    if (now === 'well') this.moveWell(x, z);
+  }
+
+  private initDesktop(): void {
+    for (let i = 0; i < 2; i++) {
+      const cursor = new Mesh(
+        new RingGeometry(0.009, 0.012, 32),
+        new MeshBasicMaterial({ color: i === 0 ? 0x9fe8ff : 0xffc46b, transparent: true, opacity: 0.9 }),
+      );
+      cursor.rotation.x = -Math.PI / 2;
+      cursor.visible = false;
+      this.cursors.push(cursor);
+      this.root.add(cursor);
+    }
+    const canvas = this.world.renderer.domElement;
+    const MOUSE = 100;
+    let pressed = false;
+    const toBoard = (e: PointerEvent): boolean => {
+      // Mouse ray through the camera, met with the play plane.
+      const rect = canvas.getBoundingClientRect();
+      const camera = this.world.camera;
+      this.v1
+        .set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1, 0.5)
+        .unproject(camera);
+      camera.getWorldPosition(this.v2);
+      this.v1.sub(this.v2).normalize();
+      const planeY = this.root.position.y + PLAY_Y;
+      if (Math.abs(this.v1.y) < 1e-4) return false;
+      const t = (planeY - this.v2.y) / this.v1.y;
+      if (t <= 0) return false;
+      this.v1.multiplyScalar(t).add(this.v2);
+      this.root.worldToLocal(this.v1);
+      return true;
+    };
+    const flat = () => this.world.visibilityState.peek() === VisibilityState.NonImmersive;
+    const onDown = (e: PointerEvent) => {
+      if (!flat() || !toBoard(e)) return;
+      pressed = true;
+      this.desktopPointer(MOUSE, this.v1.x, this.v1.z, true);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (pressed && flat() && toBoard(e)) this.desktopPointer(MOUSE, this.v1.x, this.v1.z, true);
+    };
+    const onUp = () => {
+      if (!pressed) return;
+      pressed = false;
+      this.desktopPointer(MOUSE, this.v1.x, this.v1.z, false);
+    };
+    canvas.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    this.cleanupFuncs.push(
+      () => canvas.removeEventListener('pointerdown', onDown),
+      () => window.removeEventListener('pointermove', onMove),
+      () => window.removeEventListener('pointerup', onUp),
+    );
+    if (PARAMS.get('camera') === '1') {
+      void startCameraHands((id, x, z, down, seen) => {
+        if (flat()) this.desktopPointer(id, x, z, down, seen);
+      });
+    }
   }
 
   /** Pose moving bodies for shot time `t`: mesh, grid well and the light falling on planets. */
@@ -651,7 +821,12 @@ export class OrrerySystem extends createSystem({
     // Depth-based height is live; it corrects a missing or stale plane.
     this.root.position.y += surface + 0.004;
     const before = this.desk.length;
-    this.desk = clusterDesk(samples, surface);
+    // Two-scan agreement: adopt an object only if the last scan, or the current
+    // desk, already had one there. Depth noise rarely repeats in one spot.
+    const seen = clusterDesk(samples, surface);
+    this.desk = confirmDesk([...this.lastSeen, ...this.desk], seen);
+    if (seen.length > this.desk.length) this.scanIn = 0.4; // unconfirmed candidates: look again
+    this.lastSeen = seen;
     if (this.desk.length === 0 && before === 0) return;
     this.rebuildField();
     this.refreshOcclusion();
@@ -791,8 +966,8 @@ export class OrrerySystem extends createSystem({
 
   private onRelease(): void {
     if (this.phase !== 'drag') return;
-    const px = this.comet.position.x - this.level.launcher.x;
-    const pz = this.comet.position.z - this.level.launcher.z;
+    // Launch from the smoothed pull the preview was drawn from, not the raw last frame.
+    const { px, pz } = this.aim;
     if (Math.hypot(px, pz) < MIN_PULL) {
       this.resetComet(); // a tap, not a pull
       return;
@@ -842,7 +1017,6 @@ export class OrrerySystem extends createSystem({
 
   private land(outcome: Outcome): void {
     this.timer = 0;
-    this.releaseHand();
     this.shotMesh.visible = false;
     // The spent trail stays, dimmed, as a reference for the next attempt.
     (this.trail.material as LineBasicMaterial).opacity = 0.35;
@@ -870,6 +1044,12 @@ export class OrrerySystem extends createSystem({
       );
     } else {
       this.phase = 'miss';
+      this.misses++;
+      if (this.level.void && this.misses >= 2 && this.hand.gm === 0 && this.desk.length === 0 && this.level.helper) {
+        this.hintRing.position.set(this.level.helper.x, PLAY_Y - 0.004, this.level.helper.z);
+        this.hintRing.visible = true;
+      }
+      if (this.misses === 5) this.buildGhost();
       if (outcome === 'crash') {
         this.particles.burst(x, PLAY_Y, z, 45, 0.16, 0.6, 1, 0.5, 0.15);
         sfx.crash();
@@ -888,10 +1068,12 @@ export class OrrerySystem extends createSystem({
     }
   }
 
-  private updateDrag(): void {
+  private updateDrag(delta: number): void {
     const l = this.level.launcher;
-    const px = this.comet.position.x - l.x;
-    const pz = this.comet.position.z - l.z;
+    const k = tune.releaseSmooth > 0 ? Math.min(1, delta / tune.releaseSmooth) : 1;
+    this.aim.px += (this.comet.position.x - l.x - this.aim.px) * k;
+    this.aim.pz += (this.comet.position.z - l.z - this.aim.pz) * k;
+    const { px, pz } = this.aim;
     const pull = Math.min(1, Math.hypot(px, pz) / MAX_PULL);
 
     this.bandPos.set([l.x, PLAY_Y, l.z, this.comet.position.x, this.comet.position.y, this.comet.position.z]);
@@ -906,13 +1088,14 @@ export class OrrerySystem extends createSystem({
 
     // Short look-ahead: long on the first level to teach, shorter after so the
     // curve past the first planet is still the player's to work out.
-    const dots = this.level.difficulty === 0 ? PREVIEW_MAX : 20;
+    // Empty skies get the long preview too: watching the line bend as gravity is moved is the lesson.
+    const dots = this.level.difficulty === 0 || this.level.void ? PREVIEW_MAX : 20;
     let n = 0;
     if (pull * MAX_PULL >= MIN_PULL) {
-      const s = launch(this.field, px, pz, this.scratch);
+      const s = launch(this.live, px, pz, this.scratch); // includes planted gravity
       outer: for (; n < dots; n++) {
         for (let k = 0; k < PREVIEW_STRIDE; k++) {
-          if (step(this.field, s) !== 'flying') break outer;
+          if (step(this.live, s) !== 'flying') break outer;
         }
         this.previewPos.set([s.x, PLAY_Y, s.z], n * 3);
       }
@@ -948,6 +1131,8 @@ export class OrrerySystem extends createSystem({
       this.boardHandle.position.copy(HANDLE_OFFSET).applyMatrix4(this.root.matrixWorld);
     }
 
+    this.updateWell();
+
     if (this.dropComet) {
       this.dropComet = false;
       this.world.getSystem(GrabSystem)?.forceRelease(this.cometEntity);
@@ -962,17 +1147,16 @@ export class OrrerySystem extends createSystem({
         break;
       case 'drag':
         this.ghost.visible = false;
-        this.updateDrag();
+        this.updateDrag(delta);
         break;
       case 'fly': {
-        this.updateHand();
         // Slow motion on the close pass: the film shot of the slingshot. Sim time
         // per frame shrinks; the path itself is untouched.
-        const near = this.primary?.kind === 'hole' ? 0.075 : 0.05;
+        const near = (this.primary?.kind === 'hole' ? 0.075 : 0.05) * tune.slowReach;
         const dPrimary = this.primary
           ? Math.hypot(this.shot.x - this.star.x, this.shot.z - this.star.z) - this.primary.r
           : 1;
-        const timeScale = Math.min(1, Math.max(0.3, dPrimary / near));
+        const timeScale = Math.min(1, Math.max(tune.slowFloor, dPrimary / near));
         this.acc = Math.min(this.acc + delta * timeScale, 0.1);
         let outcome: Outcome = 'flying';
         while (this.acc >= DT && outcome === 'flying') {

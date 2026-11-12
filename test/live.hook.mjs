@@ -19,7 +19,17 @@ export default async function run({ frame }) {
   check('miss returns to aim, shot counted', s.phase === 'aim' && s.save.shots === 1 && s.save.index === 0, s);
   // Win all three daily levels with the solver's answer.
   for (let i = 0; i < 3; i++) {
-    await frame.evaluate(() => { const b = window.__perihelion.solve(); window.__perihelion.shoot(b.px, b.pz); });
+    await frame.evaluate(() => {
+      const p = window.__perihelion;
+      const level = p.state().level;
+      if (level.void) {
+        // Empty sky: nothing to solve until gravity is planted. Plant it where the generator proved it works.
+        p.pointer(1, level.helper.x, level.helper.z, true);
+        p.pointer(1, level.helper.x, level.helper.z, false);
+      }
+      const b = p.solve();
+      p.shoot(b.px, b.pz);
+    });
     await wait(9000);
     s = await get();
     check(`level ${i} cleared`, s.phase === 'aim' && s.save.index === i + 1, s);
