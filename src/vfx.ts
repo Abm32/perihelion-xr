@@ -12,14 +12,19 @@ import {
   BackSide,
   BufferAttribute,
   BufferGeometry,
+  CanvasTexture,
   Color,
   DepthSensingSystem,
   Group,
   Mesh,
   PlaneGeometry,
+  MeshBasicMaterial,
   Points,
+  RingGeometry,
   ShaderMaterial,
   SphereGeometry,
+  Sprite,
+  SpriteMaterial,
   Vector3,
 } from '@iwsdk/core';
 
@@ -211,6 +216,91 @@ export function makeStar(hue: number): Mesh {
   );
   star.userData.uniforms = uniforms;
   return star;
+}
+
+let ringTexture: CanvasTexture | null = null;
+/** Thin bright ring with a soft halo, drawn once. */
+function photonRingTexture(): CanvasTexture {
+  if (ringTexture) return ringTexture;
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d')!;
+  g.strokeStyle = 'rgba(255,236,200,1)';
+  g.shadowColor = 'rgba(255,170,80,1)';
+  for (const [width, blur] of [[10, 34], [5, 12], [2, 0]]) {
+    g.lineWidth = width;
+    g.shadowBlur = blur;
+    g.beginPath();
+    g.arc(128, 128, 88, 0, Math.PI * 2);
+    g.stroke();
+  }
+  ringTexture = new CanvasTexture(c);
+  return ringTexture;
+}
+
+/**
+ * Black hole, in the visual language films have taught everyone:
+ * - an event horizon that is truly black (in passthrough it blots out the room),
+ * - an accretion disc in differential rotation, hotter and whiter toward the
+ *   inside, brighter on the side turning toward the viewer (Doppler beaming),
+ * - a photon ring: a thin billboard circle at 1.5 horizon radii, where light
+ *   would orbit. A real lensed image is a ray-traced effect; this is a stand-in.
+ * The group is scaled by the horizon radius, so all sizes here are in horizons.
+ */
+export function makeBlackHole(): Group {
+  const uniforms = { uTime: { value: 0 } };
+  const horizon = new Mesh(sphere, new MeshBasicMaterial({ color: 0x000000 }));
+  const discGeo = new RingGeometry(1.35, 4.6, 72, 6);
+  discGeo.rotateX(-Math.PI / 2);
+  const disc = new Mesh(
+    discGeo,
+    occlude(new ShaderMaterial({
+      uniforms,
+      transparent: true,
+      depthWrite: false,
+      side: 2, // DoubleSide: seen from above and, through a well, from below
+      blending: AdditiveBlending,
+      vertexShader: /* glsl */ `
+        #include <common>
+        varying vec2 vP;
+        void main() {
+          vP = position.xz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          #include <fog_vertex>
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 diffuse;
+        uniform float opacity;
+        ${NOISE}
+        uniform float uTime;
+        varying vec2 vP;
+        void main() {
+          vec4 diffuseColor = vec4( diffuse, opacity );
+          float r = length(vP);
+          float ang = atan(vP.y, vP.x);
+          // Inner gas orbits faster than outer gas (Keplerian shear).
+          float a = ang + uTime * 2.4 / pow(r, 1.5);
+          float n = fbm(vec3(cos(a) * r * 1.6, sin(a) * r * 1.6, r * 2.5));
+          float streaks = 0.55 + 0.45 * sin(r * 9.0 + n * 7.0);
+          float heat = pow(1.35 / r, 0.75); // disc temperature falls with radius
+          vec3 col = mix(vec3(1.0, 0.32, 0.08), vec3(1.0, 0.95, 0.85), clamp(heat * 1.2 - 0.25, 0.0, 1.0));
+          float beaming = 0.55 + 0.45 * cos(ang - 0.6);
+          float edge = smoothstep(1.35, 1.7, r) * (1.0 - smoothstep(3.2, 4.6, r));
+          gl_FragColor = vec4(col, edge * streaks * beaming * (0.35 + heat) * 1.4);
+          gl_FragColor.a *= diffuseColor.a; // real-world occlusion
+        }
+      `,
+    })),
+  );
+  const ring = new Sprite(
+    new SpriteMaterial({ map: photonRingTexture(), blending: AdditiveBlending, depthWrite: false, transparent: true }),
+  );
+  ring.scale.setScalar(4.36); // ring drawn at 88/128 of the half-size: 1.5 horizons
+  const group = new Group();
+  group.add(disc, horizon, ring);
+  group.userData.uniforms = uniforms;
+  return group;
 }
 
 /**

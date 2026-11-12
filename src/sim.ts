@@ -12,6 +12,23 @@ export interface Body {
   hue: number;
   /** A real object found on the player's desk, not a generated body. */
   real?: boolean;
+  /** Generated bodies: the heaviest is a star or a black hole, the rest are planets. */
+  kind?: 'star' | 'hole' | 'planet';
+  /** Circular orbit. `x`,`z` hold the position at shot time 0. */
+  orbit?: { cx: number; cz: number; rad: number; phase: number; w: number };
+}
+
+/** Where a body is `t` seconds into a shot. Bodies only move while the comet flies. */
+export function bodyPos(b: Body, t: number, out: { x: number; z: number }): { x: number; z: number } {
+  if (b.orbit) {
+    const a = b.orbit.phase + b.orbit.w * t;
+    out.x = b.orbit.cx + Math.cos(a) * b.orbit.rad;
+    out.z = b.orbit.cz + Math.sin(a) * b.orbit.rad;
+  } else {
+    out.x = b.x;
+    out.z = b.z;
+  }
+  return out;
 }
 
 export interface Level {
@@ -78,8 +95,15 @@ export function step(level: Level, s: Shot): Outcome {
   let ax = 0;
   let az = 0;
   for (const b of level.bodies) {
-    const dx = b.x - s.x;
-    const dz = b.z - s.z;
+    let bx = b.x;
+    let bz = b.z;
+    if (b.orbit) {
+      const a = b.orbit.phase + b.orbit.w * s.t;
+      bx = b.orbit.cx + Math.cos(a) * b.orbit.rad;
+      bz = b.orbit.cz + Math.sin(a) * b.orbit.rad;
+    }
+    const dx = bx - s.x;
+    const dz = bz - s.z;
     const d2 = dx * dx + dz * dz;
     if (d2 < b.r * b.r) return 'crash';
     const e = d2 + (b.r > 0 ? SOFT : HAND_SOFT);
@@ -176,6 +200,45 @@ function candidate(seed: number, difficulty: number, attempt: number): Level | n
     if (!clear) return null;
     bodies.push(b);
   }
+
+  const heavy = bodies.reduce((a, b) => (b.gm > a.gm ? b : a), bodies[0]);
+  for (const b of bodies) b.kind = b === heavy ? 'star' : 'planet';
+  if (difficulty > 0 && rnd() < 0.4) {
+    // Black hole: far more mass in a far smaller body, so close passes are violent.
+    heavy.kind = 'hole';
+    heavy.gm = Math.min(0.02, heavy.gm * 1.8);
+    heavy.r = 0.012;
+  }
+  if (difficulty > 1) {
+    // One planet (never the blocker on the firing line) becomes a moon of the primary.
+    const moon = bodies.find((b, i) => b !== heavy && i !== 0);
+    if (moon) {
+      const dist = (p: { x: number; z: number }) => Math.hypot(p.x - heavy.x, p.z - heavy.z);
+      // Try a few orbit radii: the whole circle must stay on the board and clear of
+      // the pad, the ring and the other planet.
+      for (let k = 0; k < 16 && !moon.orbit; k++) {
+        const rad = heavy.r + moon.r + 0.03 + rnd() * 0.1;
+        const gap = (p: { x: number; z: number }) => Math.abs(dist(p) - rad);
+        const free =
+          Math.hypot(heavy.x, heavy.z) + rad < 0.2 &&
+          gap(launcher) > moon.r + 0.045 &&
+          gap(target) > moon.r + 0.04 &&
+          bodies.every((o) => o === moon || o === heavy || gap(o) > moon.r + o.r + 0.02);
+        if (!free) continue;
+        const phase = rnd() * Math.PI * 2;
+        moon.x = heavy.x + Math.cos(phase) * rad;
+        moon.z = heavy.z + Math.sin(phase) * rad;
+        moon.orbit = {
+          cx: heavy.x,
+          cz: heavy.z,
+          rad,
+          phase,
+          // Kepler's third law, capped so the motion stays readable.
+          w: (rnd() < 0.5 ? -1 : 1) * Math.min(2.2, Math.sqrt(heavy.gm / rad ** 3)),
+        };
+      }
+    }
+  }
   return { seed, difficulty, launcher, target, bodies };
 }
 
@@ -194,6 +257,8 @@ export function generate(seed: number, difficulty: number): Level {
   for (let attempt = 0; attempt < 60; attempt++) {
     const level = candidate(seed, d, attempt);
     if (!level || (d > 0 && !lineBlocked(level))) continue;
+    // Hard levels should have a moon; settle for a static sky only late in the search.
+    if (d === 2 && attempt < 45 && !level.bodies.some((b) => b.orbit)) continue;
     const { count } = solve(level);
     if (count >= min && count <= max) return level;
     if (count > 0) fallback ??= level;
@@ -234,6 +299,8 @@ export interface Save {
   todayShots: number;
   /** Hand gravity was used at least once today. */
   nudged: boolean;
+  /** Closest winning pass of the primary ever flown, in meters (0 = none yet). */
+  closest: number;
   /** One entry per day of the current streak, newest last: 1 = cleared, 2 = cleared with no hand gravity. */
   log: number[];
 }
@@ -246,6 +313,7 @@ export const EMPTY_SAVE: Save = {
   shots: 0,
   todayShots: 0,
   nudged: false,
+  closest: 0,
   log: [],
 };
 
