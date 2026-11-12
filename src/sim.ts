@@ -51,17 +51,21 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
-/** Pull vector (handle minus launcher) to a fresh shot. Pull is clamped. */
-export function launch(level: Level, px: number, pz: number): Shot {
+/** Pull vector (handle minus launcher) to a fresh shot. Pull is clamped. Pass `out` to reuse. */
+export function launch(
+  level: Level,
+  px: number,
+  pz: number,
+  out: Shot = { x: 0, z: 0, vx: 0, vz: 0, t: 0 },
+): Shot {
   const len = Math.hypot(px, pz);
   const k = len > MAX_PULL ? MAX_PULL / len : 1;
-  return {
-    x: level.launcher.x,
-    z: level.launcher.z,
-    vx: -px * k * POWER,
-    vz: -pz * k * POWER,
-    t: 0,
-  };
+  out.x = level.launcher.x;
+  out.z = level.launcher.z;
+  out.vx = -px * k * POWER;
+  out.vz = -pz * k * POWER;
+  out.t = 0;
+  return out;
 }
 
 export function step(level: Level, s: Shot): Outcome {
