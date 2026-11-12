@@ -37,6 +37,10 @@ export const MIN_PULL = 0.015;
 export const POWER = 5; // launch speed (m/s) per meter of pull
 export const LEVELS_PER_DAY = 3;
 const SOFT = 1e-5;
+/** A hand has no surface to crash into (r = 0), so it gets a 2 cm softening instead. */
+const HAND_SOFT = 4e-4;
+/** Pull of a pinching hand: about a mid-sized planet. */
+export const HAND_GM = 0.006;
 const LOST_R2 = (BOARD_R + 0.08) ** 2;
 const MAX_T = 6;
 
@@ -76,7 +80,8 @@ export function step(level: Level, s: Shot): Outcome {
     const dz = b.z - s.z;
     const d2 = dx * dx + dz * dz;
     if (d2 < b.r * b.r) return 'crash';
-    const inv = b.gm / ((d2 + SOFT) * Math.sqrt(d2 + SOFT));
+    const e = d2 + (b.r > 0 ? SOFT : HAND_SOFT);
+    const inv = b.gm / (e * Math.sqrt(e));
     ax += dx * inv;
     az += dz * inv;
   }
@@ -225,6 +230,10 @@ export interface Save {
   shots: number;
   /** Shots used to finish today's set (0 = not finished). */
   todayShots: number;
+  /** Hand gravity was used at least once today. */
+  nudged: boolean;
+  /** One entry per day of the current streak, newest last: 1 = cleared, 2 = cleared with no hand gravity. */
+  log: number[];
 }
 
 export const EMPTY_SAVE: Save = {
@@ -234,6 +243,8 @@ export const EMPTY_SAVE: Save = {
   index: 0,
   shots: 0,
   todayShots: 0,
+  nudged: false,
+  log: [],
 };
 
 /** Roll the save forward to `day`: new day resets progress, a skipped day breaks the streak. */
@@ -245,7 +256,9 @@ export function openDay(save: Save, day: number): Save {
     index: 0,
     shots: 0,
     todayShots: 0,
+    nudged: false,
     streak: save.lastDay >= day - 1 ? save.streak : 0,
+    log: save.lastDay >= day - 1 ? save.log : [],
   };
 }
 
@@ -256,6 +269,7 @@ export function clearLevel(save: Save): Save {
     next.streak = save.streak + 1;
     next.lastDay = save.day;
     next.todayShots = save.shots;
+    next.log = [...save.log, save.nudged ? 1 : 2].slice(-30);
   }
   return next;
 }

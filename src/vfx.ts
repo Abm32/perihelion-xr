@@ -187,7 +187,7 @@ export function makeGravityGrid(radius: number) {
   geo.rotateX(-Math.PI / 2);
   const uniforms = {
     // xy = board xz, z = gravitational parameter (0 = unused slot)
-    uBodies: { value: [new Vector3(), new Vector3(), new Vector3()] },
+    uBodies: { value: [new Vector3(), new Vector3(), new Vector3(), new Vector3()] }, // last slot: the player's hand
     // xy = board xz of the ring, z = seconds since the hit (<0 = idle)
     uRipple: { value: new Vector3(0, 0, -1) },
     uRadius: { value: radius },
@@ -199,14 +199,14 @@ export function makeGravityGrid(radius: number) {
       transparent: true,
       depthWrite: false,
       vertexShader: /* glsl */ `
-        uniform vec3 uBodies[3];
+        uniform vec3 uBodies[4];
         uniform vec3 uRipple;
         varying vec2 vP;
         varying float vDepth;
         void main() {
           vec3 p = position;
           float pot = 0.0;
-          for (int i = 0; i < 3; i++) {
+          for (int i = 0; i < 4; i++) {
             vec2 q = p.xz - uBodies[i].xy;
             pot += uBodies[i].z / sqrt(dot(q, q) + 0.0009);
           }
