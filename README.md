@@ -329,6 +329,32 @@ hides it.
 The plane test uses each plane's center, not its outline. A very large desk whose center is far away is
 missed; the rim puck covers that case.
 
+### Field of view
+
+Meta VR devices differ in field of view. The narrowest target, Meta VR Glasses, shows 37° to each side,
+25° above and 43° below the view axis. Looking at the board's centre from the default seat (pitch 39°
+down), every essential element sits inside that:
+
+| Element | Horizontal | Vertical | Limit |
+|---|---|---|---|
+| Board, left and right edge | ±24.9° | 0° | ±37° |
+| Board, near edge | 0° | −24.6° | −43° |
+| Comet at full pull-back | 0° | −27.2° | −43° |
+| Board, far edge and streak lights | 0° | +12.8° | +25° |
+| HUD, top corners | ±13.7° | about +18° | +25° |
+| Rim puck | +27.7° | −11.4° | ±37° |
+
+Angles are computed from the runtime board and head positions, against the view axis. The emulator's
+glasses profile confirms it: nothing is clipped by the mask.
+
+![Glasses field of view](docs/screens/glasses-fov-emulator.png)
+
+<sub>IWSDK emulator, Meta VR Glasses profile. Black is outside the device's view. Captured before the HUD
+was lowered by 2.5 cm for extra margin.</sub>
+
+The game uses near pinch, not gaze, so it needs no gaze-specific handling; an emulated hand pinch, pull and
+release was run under the glasses profile and launched normally.
+
 ### Pause and resume
 
 While `visibilityState` is `VisibleBlurred` (system menu open) the system skips its update, so a shot in
@@ -428,6 +454,8 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - **Not yet tested on a physical headset.** Pinch feel, plane snapping on a real desk and frame rate on
   Quest hardware are unverified. In the emulator, seated at its coffee table, plane snapping and the
   depth correction both ran (0.424 m, then 0.440 m).
+- The field-of-view check assumes the default seat. A player sitting much closer, or with the board
+  dragged far to one side, can push the rim puck or HUD out of a narrow view.
 - Frame rate has not been profiled. The 60 fps minimum is a target, not a measurement.
 - The streak is stored per browser. Clearing site data resets it; there is no account or leaderboard.
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
@@ -453,3 +481,4 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Engineering log written.
 - Orbiting moons, black holes, slow-motion passes, perihelion telemetry, frame-rate governor.
 - Physics explainer written.
+- Field-of-view pass with the Meta VR Glasses emulator profile; HUD lowered.

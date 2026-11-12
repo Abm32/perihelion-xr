@@ -33,6 +33,7 @@ was verified in the IWSDK browser emulator (Quest 3 profile, emulated hands, syn
 | 22 | [A black hole without ray tracing](#22-a-black-hole-without-ray-tracing) | Three cheap layers that read as one |
 | 23 | [Slow motion without breaking determinism](#23-slow-motion-without-breaking-determinism) | Scale time fed to the fixed step |
 | 24 | [No way to measure frame rate](#24-no-way-to-measure-frame-rate) | The app governs itself |
+| 25 | [Would it fit a narrower headset view?](#25-would-it-fit-a-narrower-headset-view) | Measured against the glasses profile; HUD lowered |
 
 ---
 
@@ -325,6 +326,20 @@ to off. It only ever steps down, so there is no oscillation.
 
 **Trade-off.** In the headless emulator, which is slow, the governor fires. That is expected and does not
 reflect device performance either way.
+
+## 25. Would it fit a narrower headset view?
+
+**Problem.** Judging asks for field-of-view-aware design, and the board was laid out by eye in a Quest 3
+emulator. Meta VR Glasses see only 37° to each side, 25° up and 43° down.
+
+**What we did.** Switched the emulator to the `metaVRGlasses` profile, looked at the board centre from the
+default seat, and captured the masked frame. Separately computed each essential element's angle against
+the view axis from runtime positions. Everything fit. The tightest was the top of the HUD at 20.1° against
+a 25° limit, so the HUD was lowered 2.5 cm (to about 18°). The widest is the rim puck at 27.7° against 37°.
+
+**Verified.** Masked screenshot shows board, HUD, puck and streak lights unclipped; a hand pinch, pull and
+release under the glasses profile launched a shot. The table of angles is in the README.
+**Unproven.** Fit for a player who sits much closer than the default 45 cm.
 
 ---
 
