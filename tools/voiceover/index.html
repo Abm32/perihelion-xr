@@ -81,6 +81,9 @@
       </div>
 
       <div class="opts">
+        <label>Camera
+          <select id="camSel"><option value="">Start the camera to list cameras</option></select>
+        </label>
         <label>Face bubble position
           <select id="pos">
             <option value="br">Bottom right</option>
@@ -92,11 +95,11 @@
         </label>
         <label>Bubble shape
           <select id="shape">
-            <option value="round">Rounded square</option>
             <option value="circle">Circle</option>
+            <option value="round">Rounded square</option>
           </select>
         </label>
-        <label>Bubble size <input id="size" type="range" min="120" max="320" value="200" /></label>
+        <label>Bubble size <input id="size" type="range" min="120" max="320" value="190" /></label>
         <label>Video music in the recording <input id="music" type="range" min="0" max="100" value="35" /></label>
         <label>Your voice level <input id="voice" type="range" min="0" max="200" value="100" /></label>
         <label>Highlight runs ahead of the video (0 to 1 s) <input id="lead" type="range" min="0" max="10" value="3" /></label>
@@ -139,7 +142,7 @@
       const g = canvas.getContext('2d');
       const W = canvas.width;
       const H = canvas.height;
-      const KEY = 'perihelion.voiceover';
+      const KEY = 'perihelion.voiceover.v2';
 
       // ---- settings that persist ------------------------------------------------
       const saved = (() => {
@@ -226,7 +229,7 @@
       function draw() {
         if (demo.readyState >= 2) g.drawImage(demo, 0, 0, W, H);
         else { g.fillStyle = '#05070d'; g.fillRect(0, 0, W, H); }
-        if ($('pos').value !== 'off' && face.readyState >= 2) {
+        if ($('pos').value !== 'off' && face.readyState >= 2 && face.videoWidth > 0) {
           const { x, y, size } = bubbleRect();
           // Crop the camera to a centred square and mirror it, like a selfie view.
           const side = Math.min(face.videoWidth, face.videoHeight);
@@ -270,34 +273,77 @@
         if (audio.micGain) audio.micGain.gain.value = Number($('voice').value) / 100;
       }
 
-      let camStream = null;
-      $('cam').onclick = async () => {
+      let camStream = null; // microphone
+      let faceStream = null; // camera
+
+      /** Open one camera. Returns an error message, or '' on success. */
+      async function openCamera(deviceId) {
         try {
-          camStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480, facingMode: 'user' },
-            audio: { echoCancellation: true, noiseSuppression: true },
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: deviceId ? { deviceId: { exact: deviceId } } : true,
           });
-        } catch (error) {
-          try {
-            // No camera, or it was refused: carry on with voice only.
-            camStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            $('pos').value = 'off';
-          } catch (e) {
-            $('status').textContent = 'Camera and microphone unavailable: ' + e.message;
-            return;
-          }
-        }
-        if (camStream.getVideoTracks().length) {
-          face.srcObject = new MediaStream(camStream.getVideoTracks());
+          faceStream?.getTracks().forEach((t) => t.stop());
+          faceStream = stream;
+          face.srcObject = stream;
           await face.play();
+          return '';
+        } catch (error) {
+          return `${error.name}: ${error.message}`;
+        }
+      }
+
+      /**
+       * A computer can have several cameras and the default one may be unplugged,
+       * asleep or in use. Try the remembered one, then every camera in turn, and
+       * say plainly which one is live (or why none is).
+       */
+      async function startFace(preferred) {
+        let cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+        const order = [...cams].sort((a, b) => (b.deviceId === preferred) - (a.deviceId === preferred));
+        const failures = [];
+        let live = '';
+        for (const cam of order.length ? order : [{ deviceId: '', label: 'default camera' }]) {
+          const error = await openCamera(cam.deviceId);
+          if (!error) { live = cam.deviceId; break; }
+          failures.push(`${cam.label || 'camera'} (${error})`);
+        }
+        // Labels are only available once a camera has been opened.
+        cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+        const sel = $('camSel');
+        sel.innerHTML = cams.map((c, i) => `<option value="${c.deviceId}">${(c.label || 'Camera ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
+        const track = faceStream?.getVideoTracks()[0];
+        if (track) {
+          sel.value = track.getSettings().deviceId ?? live;
+          try { localStorage.setItem(KEY + '.cam', sel.value); } catch { /* not remembered */ }
+          return `Face camera: ${track.label}.` + (failures.length ? ` Skipped: ${failures.join('; ')}.` : '');
+        }
+        return `No camera could be opened: ${failures.join('; ') || 'none found'}. Recording voice only.`;
+      }
+
+      $('camSel').onchange = async () => {
+        const error = await openCamera($('camSel').value);
+        $('status').textContent = error ? `That camera would not open (${error}).` : `Face camera: ${faceStream.getVideoTracks()[0].label}.`;
+        if (!error) try { localStorage.setItem(KEY + '.cam', $('camSel').value); } catch { /* not remembered */ }
+      };
+
+      $('cam').onclick = async () => {
+        $('status').textContent = 'Starting…';
+        try {
+          camStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        } catch (e) {
+          $('status').textContent = `Microphone unavailable: ${e.name}: ${e.message}`;
+          return;
         }
         const a = ensureAudio();
         a.micGain = a.ctx.createGain();
-        a.ctx.createMediaStreamSource(new MediaStream(camStream.getAudioTracks())).connect(a.micGain).connect(a.out);
+        a.ctx.createMediaStreamSource(camStream).connect(a.micGain).connect(a.out);
         applyLevels();
+        let remembered = '';
+        try { remembered = localStorage.getItem(KEY + '.cam') ?? ''; } catch { /* none */ }
+        const faceStatus = await startFace(remembered);
         $('rec').disabled = false;
         $('cam').disabled = true;
-        $('status').textContent = 'Camera and mic are on. Use headphones if you want to hear the video.';
+        $('status').textContent = `Microphone on. ${faceStatus}`;
       };
 
       // ---- transport ---------------------------------------------------------------
