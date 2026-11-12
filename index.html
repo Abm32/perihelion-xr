@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+      content="width=device-width, initial-scale=1, shrink-to-fit=no, user-scalable=no"
     />
     <link rel="icon" href="data:," />
     <title>Perihelion</title>
@@ -13,9 +13,10 @@
     <div id="scene-container"></div>
     <!-- Shown in the browser only; an immersive session does not render page HTML. -->
     <div
-      style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:5;padding:7px 14px;border-radius:999px;background:rgba(8,12,22,.82);color:#dfe8ff;font:13px system-ui,sans-serif;white-space:nowrap"
+      style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:5;padding:7px 14px;border-radius:16px;background:rgba(8,12,22,.82);color:#dfe8ff;font:13px system-ui,sans-serif;max-width:92vw;width:max-content;text-align:center"
     >
-      No headset? Drag the comet with the mouse; click the board to plant gravity.
+      No headset? Drag the comet; tap or click the board to plant gravity. On an Android phone,
+      <i>Play on your desk</i> opens it in AR.
       <a href="?camera=1" style="color:#9fe8ff">Use webcam hands</a> ·
       <a href="?tune=1" style="color:#9fe8ff">Tuning</a>
     </div>

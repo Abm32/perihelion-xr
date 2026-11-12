@@ -86,7 +86,9 @@ export class PerfRecorder {
     const r1 = (v: number) => Math.round(v * 10) / 10;
     return {
       when: new Date().toISOString(),
-      device: navigator.userAgent.match(/Quest[^;)]*|OculusBrowser\/[\d.]+/)?.[0] ?? 'desktop browser',
+      device:
+        navigator.userAgent.match(/Quest[^;)]*|OculusBrowser\/[\d.]+/)?.[0] ??
+        (/Android/.test(navigator.userAgent) ? 'Android phone' : 'desktop browser'),
       seconds: Math.round(this.time),
       frames: this.n,
       avgFps: r1(count / sum),

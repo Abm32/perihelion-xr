@@ -5,7 +5,8 @@ path exists, make one — pinch the air to plant gravity, or set your coffee mug
 
 - **Play:** https://perihelion-three.vercel.app (open in the Meta Quest browser, tap *Play on your desk*)
 - **No headset?** The same link plays in a desktop browser with the mouse, or with your real hands over a
-  webcam (`?camera=1`). See [playtesting](docs/PLAYTEST.md).
+  webcam (`?camera=1`). On an **Android phone**, *Play on your desk* opens it in AR on your real desk, with
+  touch. See [playtesting](docs/PLAYTEST.md).
 - **Built for:** Meta VR Start Developer Competition 2026 — Gaming track, New Experience
 - **Built with:** [Immersive Web SDK](https://developers.meta.com/horizon/documentation/iwsdk/guides/overview/) 1.1 (WebXR, Three.js, ECS), TypeScript, Vite
 
@@ -515,6 +516,7 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - The particle size constant is hand-tuned in the emulator and may need retuning on device.
 - Planted gravity is verified with an emulated pinch and with a mouse; how it feels with real tracking
   jitter is unknown.
+- Phone AR is verified for its touch-ray maths only; it has not been run on a phone by us.
 - Webcam hand tracking has not been run by us (no camera on the build machine). It shares all game-side
   code with the tested mouse path.
 - The empty-sky level is the hardest for the simulated player (23% gave up within 15 shots).
@@ -543,5 +545,6 @@ To test on a headset during development, open the dev server's HTTPS URL in the 
 - Simulated playtest written; draw lengthened, ring widened, forgiving answers required.
 - Planted gravity and empty-sky levels; mouse, webcam and tuning play without a headset.
 - Desk scan hardened against depth noise with two-scan agreement.
+- Phone AR on Android: touch input in the AR session, scan retries until a surface is found, mobile layout.
 - Self-measurement report; object threshold adapts to measured depth noise; playtest re-run at published
   hand-tracking error.
