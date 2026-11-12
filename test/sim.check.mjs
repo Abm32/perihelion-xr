@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   EMPTY_SAVE,
   HAND_GM,
+  bodyPos,
   clusterDesk,
   deskProbePoints,
   deskSurface,
@@ -18,6 +19,8 @@ import {
 
 const t0 = performance.now();
 let fallbacks = 0;
+let moons = 0;
+let holes = 0;
 for (let day = 20760; day < 20790; day++) {
   for (let i = 0; i < LEVELS_PER_DAY + 1; i++) {
     const level = levelFor(day, i);
@@ -26,9 +29,27 @@ for (let day = 20760; day < 20790; day++) {
     assert.ok(count > 0 && best, `day ${day} level ${i} is solvable`);
     assert.equal(fly(level, best.px, best.pz), 'hit', 'solution replays');
     if (level.bodies.length !== Math.min(i, 2) + 1) fallbacks++;
+    assert.equal(level.bodies.filter((b) => b.kind !== 'planet').length, level.bodies.length ? 1 : 0, 'one primary');
+    if (i === 0) assert.ok(level.bodies.every((b) => !b.orbit && b.kind !== 'hole'), 'first level stays simple');
+    for (const b of level.bodies) {
+      if (b.kind === 'hole') holes++;
+      if (!b.orbit) continue;
+      moons++;
+      const p0 = bodyPos(b, 0, { x: 0, z: 0 });
+      assert.ok(Math.hypot(p0.x - b.x, p0.z - b.z) < 1e-9, 'orbit starts at the stored position');
+      const p1 = bodyPos(b, (2 * Math.PI) / Math.abs(b.orbit.w), { x: 0, z: 0 });
+      assert.ok(Math.hypot(p1.x - b.x, p1.z - b.z) < 1e-9, 'orbit closes after one period');
+      for (let t = 0; t < 6; t += 0.05) {
+        const p = bodyPos(b, t, { x: 0, z: 0 });
+        assert.ok(Math.hypot(p.x - level.target.x, p.z - level.target.z) > b.r + 0.02, 'moon never covers the ring');
+        assert.ok(Math.hypot(p.x - level.launcher.x, p.z - level.launcher.z) > b.r + 0.02, 'moon never covers the pad');
+      }
+    }
   }
 }
 assert.ok(fallbacks <= 2, `generator fell back ${fallbacks} times in 120 levels`);
+assert.ok(moons >= 10, `only ${moons} orbiting moons in 120 levels`);
+assert.ok(holes >= 10, `only ${holes} black holes in 120 levels`);
 
 // Hand gravity: a pinching hand on the flight line changes the path and never produces NaN.
 {
@@ -86,4 +107,4 @@ assert.equal(openDay(s, 12).streak, 2, 'streak holds the day after');
 assert.equal(openDay(s, 13).streak, 0, 'streak breaks after a missed day');
 assert.deepEqual(openDay(s, 13).log, [], 'log clears with the streak');
 
-console.log(`sim ok (${Math.round(performance.now() - t0)} ms, ${fallbacks} fallbacks)`);
+console.log(`sim ok (${Math.round(performance.now() - t0)} ms, ${fallbacks} fallbacks, ${moons} moons, ${holes} black holes)`);

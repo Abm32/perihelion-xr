@@ -31,9 +31,10 @@ import {
 import { BoardHandle, Comet } from './game-components.js';
 import { DeskScanner } from './desk.js';
 import { resumeAudio, sfx } from './sfx.js';
-import { makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
+import { makeBlackHole, makeGravityGrid, makePlanet, makeStar, Particles } from './vfx.js';
 import {
   Body,
+  bodyPos,
   BOARD_R,
   clusterDesk,
   DeskSample,
@@ -141,6 +142,17 @@ export class OrrerySystem extends createSystem({
   private lastScan: DeskSample[] = []; // kept for the debug hook
   private scanIn = -1;
   private wasBoardHeld = false;
+  // One entry per generated body, in level order, so moving bodies can be re-posed each frame.
+  private bodyViews: { body: Body; view: Group | Mesh; light: Vector3 | null }[] = [];
+  private primary: Body | null = null;
+  private p2 = { x: 0, z: 0 };
+  // Shot telemetry: closest pass of the primary and top speed.
+  private periapsis = Infinity;
+  private topSpeed = 0;
+  // Frame-rate governor: 0 soft occlusion, 1 single-tap occlusion, 2 occlusion off.
+  private quality = 0;
+  private frameAvg = 1 / 72;
+  private perfClock = 0;
   private logLights = new Group();
   // First-level demo: a ghost performs one winning pull, then the ghost comet flies it.
   private ghost = new Group();
@@ -243,11 +255,20 @@ export class OrrerySystem extends createSystem({
         yaw: this.root.rotation.y,
         hand: { ...this.hand },
         ghost: this.ghost.visible,
+        quality: this.quality,
+        periapsis: this.periapsis,
+        topSpeed: this.topSpeed,
+        t: this.shot.t,
         comet: this.comet.getWorldPosition(new Vector3()).toArray(),
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
       solve: () => solve(this.field).best,
       desk: () => this.desk,
+      // Jump to any day's level (changes the in-memory save; for capture and tests only).
+      load: (day: number, index: number) => {
+        this.save = { ...this.save, day, index };
+        this.loadLevel();
+      },
       lastScan: () => this.lastScan,
       scanner: () => ({ supported: this.scanner.supported, busy: this.scanner.busy }),
       scan: () => { this.scanIn = 0.01; },
@@ -384,25 +405,41 @@ export class OrrerySystem extends createSystem({
     if (this.world.visibilityState.peek() !== VisibilityState.NonImmersive) this.scanIn = 0.4;
 
     const bodies = this.level.bodies;
-    const heaviest = bodies.reduce((a, b) => (b.gm > a.gm ? b : a), bodies[0]);
-    this.star = heaviest ? { x: heaviest.x, z: heaviest.z } : { x: 0, z: 0 };
+    const primary = bodies.find((b) => b.kind !== 'planet') ?? null;
+    this.primary = primary;
+    this.star = primary ? { x: primary.x, z: primary.z } : { x: 0, z: 0 };
     this.grid.uniforms.uRipple.value.z = -1;
+    this.bodyViews.length = 0;
     const color = new Color();
     for (const b of bodies) {
-      let body;
-      if (b === heaviest) {
-        body = makeStar(b.hue);
+      let view: Group | Mesh;
+      let light: Vector3 | null = null;
+      if (b.kind === 'hole') {
+        view = makeBlackHole();
+      } else if (b.kind === 'star') {
+        view = makeStar(b.hue);
         color.setHSL(0.02 + b.hue * 0.12, 1, 0.6);
-        body.add(this.halo(color.getHex(), 6)); // corona: sprite, not bloom
+        view.add(this.halo(color.getHex(), 6)); // corona: sprite, not bloom
       } else {
-        const light = new Vector3(heaviest.x - b.x, 0.15, heaviest.z - b.z).normalize();
-        body = makePlanet(b.hue, (b.gm * 1000) % 1, light);
+        light = new Vector3(0, 1, 0);
+        view = makePlanet(b.hue, (b.gm * 1000) % 1, light);
       }
-      body.position.set(b.x, PLAY_Y, b.z);
-      body.scale.setScalar(b.r);
-      this.timeUniforms.push(body.userData.uniforms.uTime);
-      this.levelGroup.add(body);
+      view.scale.setScalar(b.r);
+      this.timeUniforms.push(view.userData.uniforms.uTime);
+      this.levelGroup.add(view);
+      this.bodyViews.push({ body: b, view, light });
+      if (b.orbit) {
+        // The moon's track, so its future position can be judged before firing.
+        const track = new Mesh(
+          new RingGeometry(b.orbit.rad - 0.0007, b.orbit.rad + 0.0007, 96),
+          new MeshBasicMaterial({ color: 0x9fb8ff, transparent: true, opacity: 0.35 }),
+        );
+        track.rotation.x = -Math.PI / 2;
+        track.position.set(b.orbit.cx, PLAY_Y - 0.004, b.orbit.cz);
+        this.levelGroup.add(track);
+      }
     }
+    this.syncBodies(0);
     const t = this.level.target;
     this.targetMat = new MeshBasicMaterial({ color: 0xffd76b, transparent: true });
     this.target = new Mesh(new TorusGeometry(t.r, 0.0025, 8, 48), this.targetMat);
@@ -429,13 +466,18 @@ export class OrrerySystem extends createSystem({
           ? 'Encore. A new sky tomorrow.'
           : this.save.index === 1
             ? 'Mid-flight, pinch the air. Your hand has gravity.'
-            : 'Bend it into the ring.',
+            : bodies.some((b) => b.orbit)
+              ? 'Time moves only while the comet flies.'
+              : primary?.kind === 'hole'
+                ? 'A black hole. Stay outside the horizon.'
+                : 'Bend it into the ring.',
     );
   }
 
   private resetComet(): void {
     this.phase = 'aim';
     this.releaseHand();
+    this.syncBodies(0); // the sky rewinds with the comet
     this.comet.visible = true;
     this.comet.position.set(this.level.launcher.x, PLAY_Y, this.level.launcher.z);
     this.shotMesh.visible = false;
@@ -541,6 +583,34 @@ export class OrrerySystem extends createSystem({
     this.grid.uniforms.uBodies.value[HAND_SLOT].set(0, 0, 0);
   }
 
+  /** Pose moving bodies for shot time `t`: mesh, grid well and the light falling on planets. */
+  private syncBodies(t: number): void {
+    const slots = this.grid.uniforms.uBodies.value;
+    for (let i = 0; i < this.bodyViews.length; i++) {
+      const { body, view, light } = this.bodyViews[i];
+      const p = bodyPos(body, t, this.p2);
+      view.position.set(p.x, PLAY_Y, p.z);
+      slots[i].set(p.x, p.z, body.gm);
+      light?.set(this.star.x - p.x, 0.15, this.star.z - p.z).normalize();
+    }
+  }
+
+  /**
+   * Frame-rate governor. The build was never profiled on a headset, so the app
+   * protects its own frame rate: if frames average slower than 55 fps for three
+   * seconds, real-world occlusion steps down from 13 taps to 1, then off.
+   */
+  private govern(delta: number, immersive: boolean): void {
+    if (!immersive || this.quality >= 2) return;
+    this.frameAvg = this.frameAvg * 0.95 + delta * 0.05;
+    this.perfClock += delta;
+    if (this.perfClock > 3 && this.frameAvg > 1 / 55) {
+      this.quality++;
+      this.perfClock = 0;
+      this.refreshOcclusion();
+    }
+  }
+
   // ---- real world: desk objects and occlusion ---------------------------------
 
   /** Recompose what the comet flies through: generated bodies, real desk objects, then the hand. */
@@ -635,12 +705,12 @@ export class OrrerySystem extends createSystem({
    * Levels create new materials, so re-add the component to patch those too.
    */
   private refreshOcclusion(): void {
-    const mode = PARAMS.get('occlusion');
-    if (mode === '0') return;
-    const value = { mode: mode === 'hard' ? 'HardOcclusion' : 'SoftOcclusion' } as const;
+    const param = PARAMS.get('occlusion');
+    const off = param === '0' || this.quality >= 2;
+    const value = { mode: param === 'hard' || this.quality === 1 ? 'HardOcclusion' : 'SoftOcclusion' } as const;
     for (const entity of [this.rootEntity, this.handleEntity]) {
       if (entity.hasComponent(DepthOccludable)) entity.removeComponent(DepthOccludable);
-      entity.addComponent(DepthOccludable, value);
+      if (!off) entity.addComponent(DepthOccludable, value);
     }
   }
 
@@ -665,7 +735,9 @@ export class OrrerySystem extends createSystem({
     g.fillText(message, 512, 150, 960);
     g.fillStyle = '#ffd76b';
     g.font = '500 36px system-ui, sans-serif';
-    const best = this.save.todayShots ? `   ·   TODAY ${this.save.todayShots} SHOTS` : '';
+    const best =
+      (this.save.todayShots ? `   ·   TODAY ${this.save.todayShots}` : '') +
+      (this.save.closest ? `   ·   CLOSEST ${(this.save.closest * 100).toFixed(1)} CM` : '');
     g.fillText(`SHOTS ${this.save.shots}   ·   STREAK ${this.save.streak}${best}`, 512, 218);
     this.hudTexture.needsUpdate = true;
   }
@@ -733,6 +805,8 @@ export class OrrerySystem extends createSystem({
     this.save = { ...this.save, shots: this.save.shots + 1 };
     storeSave(this.save);
     this.phase = 'fly';
+    this.periapsis = Infinity;
+    this.topSpeed = 0;
     this.acc = 0;
     this.trailCount = 0;
     (this.trail.material as LineBasicMaterial).opacity = 1;
@@ -780,10 +854,18 @@ export class OrrerySystem extends createSystem({
       this.save = clearLevel(this.save);
       storeSave(this.save);
       sfx.hit();
+      // Perihelion: the closest point of an orbit to its star. The stat the game is named for.
+      const pass = Number.isFinite(this.periapsis) ? this.periapsis : 0;
+      const record = pass > 0 && (this.save.closest === 0 || pass < this.save.closest);
+      if (record) this.save = { ...this.save, closest: pass };
+      storeSave(this.save);
+      const stats = `${(pass * 100).toFixed(1)} cm pass at ${this.topSpeed.toFixed(2)} m/s`;
       this.say(
         this.save.streak > before.streak
           ? `Daily done in ${this.save.todayShots} shots. Streak ${this.save.streak}.`
-          : 'Perihelion!',
+          : record
+            ? `Closest pass yet: ${stats}`
+            : `Perihelion: ${stats}`,
       );
     } else {
       this.phase = 'miss';
@@ -793,7 +875,15 @@ export class OrrerySystem extends createSystem({
       } else {
         sfx.lost();
       }
-      this.say(outcome === 'crash' ? 'Burned up. Try again.' : 'Lost to deep space.');
+      const swallowed =
+        outcome === 'crash' && this.primary?.kind === 'hole' && this.periapsis < this.primary.r + 0.004;
+      this.say(
+        swallowed
+          ? 'Crossed the event horizon.'
+          : outcome === 'crash'
+            ? 'Burned up. Try again.'
+            : `Escaped at ${this.topSpeed.toFixed(2)} m/s. Lost to deep space.`,
+      );
     }
   }
 
@@ -835,6 +925,7 @@ export class OrrerySystem extends createSystem({
     if (visibility === VisibilityState.VisibleBlurred) return; // system menu open: pause
 
     this.clock += delta;
+    this.govern(delta, visibility === VisibilityState.Visible);
     for (const u of this.timeUniforms) u.value = this.clock;
     const ripple = this.grid.uniforms.uRipple.value;
     if (ripple.z >= 0) ripple.z = ripple.z > 1.4 ? -1 : ripple.z + delta;
@@ -874,13 +965,27 @@ export class OrrerySystem extends createSystem({
         break;
       case 'fly': {
         this.updateHand();
-        this.acc = Math.min(this.acc + delta, 0.1);
+        // Slow motion on the close pass: the film shot of the slingshot. Sim time
+        // per frame shrinks; the path itself is untouched.
+        const near = this.primary?.kind === 'hole' ? 0.075 : 0.05;
+        const dPrimary = this.primary
+          ? Math.hypot(this.shot.x - this.star.x, this.shot.z - this.star.z) - this.primary.r
+          : 1;
+        const timeScale = Math.min(1, Math.max(0.3, dPrimary / near));
+        this.acc = Math.min(this.acc + delta * timeScale, 0.1);
         let outcome: Outcome = 'flying';
         while (this.acc >= DT && outcome === 'flying') {
           this.acc -= DT;
           outcome = step(this.live, this.shot);
           this.pushTrail();
+          if (this.primary) {
+            const d = Math.hypot(this.shot.x - this.star.x, this.shot.z - this.star.z);
+            if (d < this.periapsis) this.periapsis = d;
+          }
+          const v = Math.hypot(this.shot.vx, this.shot.vz);
+          if (v > this.topSpeed) this.topSpeed = v;
         }
+        this.syncBodies(this.shot.t);
         this.shotMesh.position.set(this.shot.x, PLAY_Y, this.shot.z);
         this.emitTail();
         this.trail.geometry.attributes.position.needsUpdate = true;
