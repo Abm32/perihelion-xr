@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/sim.check.mjs"
+    "test": "node test/sim.check.mjs",
+    "playtest": "node test/playtest.mjs"
   },
   "dependencies": {
     "@iwsdk/core": "1.1.0-rc.2",

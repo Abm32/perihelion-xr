@@ -4,7 +4,9 @@ import {
   EMPTY_SAVE,
   HAND_GM,
   bodyPos,
+  plantedWell,
   clusterDesk,
+  confirmDesk,
   deskProbePoints,
   deskSurface,
   launch,
@@ -21,15 +23,27 @@ const t0 = performance.now();
 let fallbacks = 0;
 let moons = 0;
 let holes = 0;
+let voids = 0;
 for (let day = 20760; day < 20790; day++) {
   for (let i = 0; i < LEVELS_PER_DAY + 1; i++) {
     const level = levelFor(day, i);
     assert.deepEqual(levelFor(day, i), level, 'same seed, same level');
+    if (level.void) {
+      // Empty sky: impossible as dealt, possible once gravity is planted at the helper spot.
+      voids++;
+      assert.equal(solve(level).count, 0, `day ${day} void level has no straight path`);
+      assert.ok(level.helper, 'void level names a helper spot');
+      const helped = { ...level, bodies: [...level.bodies, plantedWell(level.helper.x, level.helper.z)] };
+      const h = solve(helped);
+      assert.ok(h.count >= 6 && h.best, `day ${day} void level opens with planted gravity`);
+      assert.equal(fly(helped, h.best.px, h.best.pz), 'hit');
+      continue;
+    }
     const { count, best } = solve(level);
     assert.ok(count > 0 && best, `day ${day} level ${i} is solvable`);
     assert.equal(fly(level, best.px, best.pz), 'hit', 'solution replays');
-    if (level.bodies.length !== Math.min(i, 2) + 1) fallbacks++;
-    assert.equal(level.bodies.filter((b) => b.kind !== 'planet').length, level.bodies.length ? 1 : 0, 'one primary');
+    if (level.bodies.length !== (i === 0 ? 1 : 3)) fallbacks++;
+    assert.equal(level.bodies.filter((b) => b.kind !== 'planet').length, 1, 'one primary');
     if (i === 0) assert.ok(level.bodies.every((b) => !b.orbit && b.kind !== 'hole'), 'first level stays simple');
     for (const b of level.bodies) {
       if (b.kind === 'hole') holes++;
@@ -48,6 +62,7 @@ for (let day = 20760; day < 20790; day++) {
   }
 }
 assert.ok(fallbacks <= 2, `generator fell back ${fallbacks} times in 120 levels`);
+assert.ok(voids >= 28, `only ${voids} void levels in 120`);
 assert.ok(moons >= 10, `only ${moons} orbiting moons in 120 levels`);
 assert.ok(holes >= 10, `only ${holes} black holes in 120 levels`);
 
@@ -89,6 +104,43 @@ assert.ok(holes >= 10, `only ${holes} black holes in 120 levels`);
   assert.equal(deskSurface(samples.map((s) => ({ ...s, h: -0.9 }))), null, 'board in mid-air');
 }
 
+// Desk scan under realistic depth noise: 1.2 cm jitter plus 3% outliers of 5 cm.
+{
+  let seed = 99;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-9)) * Math.cos(2 * Math.PI * rnd());
+  const pts = deskProbePoints();
+  let phantom = 0;
+  let found = 0;
+  let phantom2 = 0;
+  let found2 = 0;
+  let prevEmpty = [];
+  let prevMug = [];
+  for (let trial = 0; trial < 300; trial++) {
+    const noisy = (mug) => pts.map((p) => ({
+      ...p,
+      h: gauss() * 0.012 + (rnd() < 0.03 ? 0.05 : 0) + (mug && Math.hypot(p.x - 0.08, p.z + 0.04) < 0.045 ? 0.09 : 0),
+    }));
+    const empty = noisy(false);
+    const s0 = deskSurface(empty);
+    const e = s0 === null ? [] : clusterDesk(empty, s0);
+    if (e.length > 0) phantom++;
+    if (confirmDesk(prevEmpty, e).length > 0) phantom2++;
+    prevEmpty = e;
+    const withMug = noisy(true);
+    const s1 = deskSurface(withMug);
+    const m = s1 === null ? [] : clusterDesk(withMug, s1);
+    const isMug = (b) => Math.hypot(b.x - 0.08, b.z + 0.04) < 0.04;
+    if (m.some(isMug)) found++;
+    if (confirmDesk(prevMug, m).some(isMug)) found2++;
+    prevMug = m;
+  }
+  console.log(`desk noise: single scan phantom ${phantom}/300, mug ${found}/300; two-scan agreement phantom ${phantom2}/300, mug ${found2}/300`);
+  assert.ok(phantom <= 45, `single-scan phantoms: ${phantom}/300`);
+  assert.ok(phantom2 <= 3, `phantom objects survive two-scan agreement: ${phantom2}/300`);
+  assert.ok(found2 >= 285, `mug lost by two-scan agreement: ${found2}/300`);
+}
+
 // Streak: finish day 10, finish day 11, skip 12, open 13.
 let s = openDay(EMPTY_SAVE, 10);
 for (let i = 0; i < LEVELS_PER_DAY; i++) s = clearLevel({ ...s, shots: s.shots + 2 });
@@ -107,4 +159,4 @@ assert.equal(openDay(s, 12).streak, 2, 'streak holds the day after');
 assert.equal(openDay(s, 13).streak, 0, 'streak breaks after a missed day');
 assert.deepEqual(openDay(s, 13).log, [], 'log clears with the streak');
 
-console.log(`sim ok (${Math.round(performance.now() - t0)} ms, ${fallbacks} fallbacks, ${moons} moons, ${holes} black holes)`);
+console.log(`sim ok (${Math.round(performance.now() - t0)} ms, ${fallbacks} fallbacks, ${moons} moons, ${holes} black holes, ${voids} voids)`);
