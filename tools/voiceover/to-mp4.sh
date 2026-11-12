@@ -5,7 +5,8 @@ set -euo pipefail
 in="${1:?usage: to-mp4.sh take.webm [out.mp4]}"
 out="${2:-${in%.*}.mp4}"
 # WebM from MediaRecorder has variable frame timing; resample to a constant 30 fps.
+# Loudness is normalised to -16 LUFS, the level streaming sites expect for speech.
 ffmpeg -v error -y -i "$in" -vf "fps=30,format=yuv420p" -c:v libx264 -crf 18 -preset medium \
-  -c:a aac -b:a 160k -movflags +faststart "$out"
+  -af "loudnorm=I=-16:TP=-1.5:LRA=11" -ar 48000 -c:a aac -b:a 160k -movflags +faststart "$out"
 ffprobe -v error -show_entries format=duration,size -of default=nw=1 "$out"
 echo "$out"

@@ -46,6 +46,10 @@
       summary { cursor: pointer; color: var(--dim); }
       textarea { width: 100%; height: 260px; margin-top: 8px; font: 13px/1.5 ui-monospace, monospace; color: var(--text); background: #0b1020; border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
       #status { color: var(--dim); margin-left: 4px; }
+      .meter { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: var(--dim); font-size: 13px; }
+      .meter .track { flex: 1; height: 12px; background: var(--line); border-radius: 6px; overflow: hidden; }
+      .meter .track i { display: block; height: 100%; width: 0; background: #57d98a; transition: width 0.05s linear; }
+      .meter b { min-width: 13ch; color: var(--text); font-weight: 600; }
       #result { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--gold); border-radius: 14px; display: none; }
       #result a { color: var(--gold); font-weight: 700; }
       code { background: #0b1020; padding: 2px 6px; border-radius: 6px; }
@@ -80,9 +84,18 @@
         <span id="status"></span>
       </div>
 
+      <div class="meter">
+        Your voice
+        <div class="track"><i id="vu"></i></div>
+        <b id="vuText">mic off</b>
+      </div>
+
       <div class="opts">
         <label>Camera
           <select id="camSel"><option value="">Start the camera to list cameras</option></select>
+        </label>
+        <label>Microphone
+          <select id="micSel"><option value="">Start the mic to list microphones</option></select>
         </label>
         <label>Face bubble position
           <select id="pos">
@@ -101,7 +114,7 @@
         </label>
         <label>Bubble size <input id="size" type="range" min="120" max="320" value="190" /></label>
         <label>Video music in the recording <input id="music" type="range" min="0" max="100" value="35" /></label>
-        <label>Your voice level <input id="voice" type="range" min="0" max="200" value="100" /></label>
+        <label>Your voice level <input id="voice" type="range" min="0" max="300" value="150" /></label>
         <label>Highlight runs ahead of the video (0 to 1 s) <input id="lead" type="range" min="0" max="10" value="3" /></label>
       </div>
 
@@ -263,14 +276,22 @@
         const musicGain = ctx.createGain();
         // Routed only into the recording, not the speakers, so the mic cannot pick it up.
         ctx.createMediaElementSource(demo).connect(musicGain).connect(out);
-        audio = { ctx, out, musicGain, micGain: null };
+        // Every node is kept on this object. A MediaStreamAudioSourceNode that nothing
+        // references is garbage-collected by Chrome, and the microphone then goes
+        // silent in the recording without any error.
+        const micGain = ctx.createGain();
+        const tap = ctx.createAnalyser();
+        tap.fftSize = 2048;
+        micGain.connect(out);
+        micGain.connect(tap); // the meter reads the same signal the recording gets
+        audio = { ctx, out, musicGain, micGain, tap, micSource: null, buf: new Float32Array(tap.fftSize), takePeak: 0 };
         applyLevels();
         return audio;
       }
       function applyLevels() {
         if (!audio) return;
         audio.musicGain.gain.value = Number($('music').value) / 100;
-        if (audio.micGain) audio.micGain.gain.value = Number($('voice').value) / 100;
+        audio.micGain.gain.value = Number($('voice').value) / 100;
       }
 
       let camStream = null; // microphone
@@ -326,24 +347,107 @@
         if (!error) try { localStorage.setItem(KEY + '.cam', $('camSel').value); } catch { /* not remembered */ }
       };
 
+      /** Open a microphone and wire it into the recording. Returns an error message, or ''. */
+      async function openMic(deviceId) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+          const a = ensureAudio();
+          a.micSource?.disconnect();
+          camStream?.getTracks().forEach((t) => t.stop());
+          camStream = stream;
+          a.micSource = a.ctx.createMediaStreamSource(stream); // held on `audio`: see ensureAudio
+          a.micSource.connect(a.micGain);
+          applyLevels();
+          const mics = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+          const sel = $('micSel');
+          sel.innerHTML = mics.map((m, i) => `<option value="${m.deviceId}">${(m.label || 'Microphone ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
+          sel.value = stream.getAudioTracks()[0].getSettings().deviceId ?? '';
+          return '';
+        } catch (error) {
+          return `${error.name}: ${error.message}`;
+        }
+      }
+      /** Peak level of one microphone over about 0.8 s, in dB. Opens it raw, then closes it. */
+      async function micLevel(deviceId) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          });
+          const ctx = ensureAudio().ctx;
+          const node = ctx.createMediaStreamSource(stream);
+          const probe = ctx.createAnalyser();
+          probe.fftSize = 2048;
+          node.connect(probe);
+          const buf = new Float32Array(probe.fftSize);
+          let peak = 0;
+          for (let i = 0; i < 8; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            probe.getFloatTimeDomainData(buf);
+            for (const v of buf) peak = Math.max(peak, Math.abs(v));
+          }
+          node.disconnect();
+          stream.getTracks().forEach((t) => t.stop());
+          return peak > 0 ? 20 * Math.log10(peak) : -120;
+        } catch {
+          return -120;
+        }
+      }
+
+      /**
+       * Some devices appear as a microphone and send nothing (a camera in webcam
+       * mode, for one). A real microphone in a room is never digitally silent,
+       * so listen to each one briefly and use the one that actually hears something.
+       */
+      async function pickWorkingMic() {
+        const mics = (await navigator.mediaDevices.enumerateDevices())
+          .filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications');
+        let best = null;
+        const silent = [];
+        for (const mic of mics) {
+          const db = await micLevel(mic.deviceId);
+          if (db < -75) silent.push(mic.label || 'a microphone');
+          if (!best || db > best.db) best = { mic, db };
+        }
+        if (!best || best.db < -75) return 'Every microphone is silent. Check that one is plugged in and not muted.';
+        const error = await openMic(best.mic.deviceId);
+        if (error) return `Microphone would not open (${error}).`;
+        return `Microphone: ${best.mic.label}.` + (silent.length ? ` Ignored, sends no sound: ${silent.join('; ')}.` : '');
+      }
+
+      $('micSel').onchange = async () => {
+        const error = await openMic($('micSel').value);
+        $('status').textContent = error ? `That microphone would not open (${error}).` : `Microphone: ${camStream.getAudioTracks()[0].label}.`;
+      };
+
+      // Live voice meter, read from the exact signal that is being recorded.
+      setInterval(() => {
+        if (!audio?.micSource) return;
+        audio.tap.getFloatTimeDomainData(audio.buf);
+        let peak = 0;
+        for (const v of audio.buf) peak = Math.max(peak, Math.abs(v));
+        if (running) audio.takePeak = Math.max(audio.takePeak, peak);
+        const db = peak > 0 ? 20 * Math.log10(peak) : -90;
+        $('vu').style.width = Math.max(0, Math.min(100, ((db + 60) / 60) * 100)) + '%';
+        $('vu').style.background = db > -3 ? '#ff5d6c' : db > -30 ? '#57d98a' : '#5b6b93';
+        $('vuText').textContent = db < -45 ? 'too quiet' : db > -3 ? 'too loud' : 'good';
+      }, 60);
+
       $('cam').onclick = async () => {
         $('status').textContent = 'Starting…';
-        try {
-          camStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-        } catch (e) {
-          $('status').textContent = `Microphone unavailable: ${e.name}: ${e.message}`;
+        const micError = await openMic(''); // asks permission and reveals device names
+        if (micError) {
+          $('status').textContent = `Microphone unavailable: ${micError}`;
           return;
         }
-        const a = ensureAudio();
-        a.micGain = a.ctx.createGain();
-        a.ctx.createMediaStreamSource(camStream).connect(a.micGain).connect(a.out);
-        applyLevels();
+        const micStatus = await pickWorkingMic();
         let remembered = '';
         try { remembered = localStorage.getItem(KEY + '.cam') ?? ''; } catch { /* none */ }
         const faceStatus = await startFace(remembered);
         $('rec').disabled = false;
         $('cam').disabled = true;
-        $('status').textContent = `Microphone on. ${faceStatus}`;
+        $('status').textContent = `${micStatus} ${faceStatus} Say something: the green bar should move.`;
       };
 
       // ---- transport ---------------------------------------------------------------
@@ -370,6 +474,7 @@
         await audio.ctx.resume();
         demo.pause();
         demo.currentTime = 0;
+        audio.takePeak = 0;
         $('result').style.display = 'none';
         $('rehearse').disabled = $('rec').disabled = true;
         await countdown();
@@ -405,7 +510,14 @@
         const name = `perihelion-voiceover.${ext}`;
         const box = $('result');
         box.style.display = 'block';
+        const peakDb = audio.takePeak > 0 ? 20 * Math.log10(audio.takePeak) : -90;
+        const voiceNote = !audio.micSource
+          ? '<b style="color:#ff5d6c">No microphone was on: this take has no voice.</b> '
+          : peakDb < -35
+            ? `<b style="color:#ff5d6c">Your voice was barely picked up (peak ${peakDb.toFixed(0)} dB). Check the microphone and record again.</b> `
+            : `Voice peak ${peakDb.toFixed(0)} dB. `;
         box.innerHTML =
+          voiceNote +
           `<b>Take captured:</b> ${demo.currentTime.toFixed(1)} s, ${(blob.size / 1e6).toFixed(1)} MB. ` +
           `<a href="${url}" download="${name}">Download ${name}</a> ` +
           (ext === 'webm' ? '— YouTube accepts WebM as is. ' : '') +
