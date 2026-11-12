@@ -351,7 +351,8 @@ export class OrrerySystem extends createSystem({
       new PlaneGeometry(0.36, 0.09),
       new MeshBasicMaterial({ map: this.hudTexture, transparent: true }),
     );
-    hud.position.set(0, 0.15, -BOARD_R - 0.03);
+    // Low enough to sit inside the Meta VR Glasses view (25 degrees above the view axis).
+    hud.position.set(0, 0.125, -BOARD_R - 0.03);
     hud.rotation.x = -0.45; // tilt up toward a seated player's eyes
 
     this.handOrb = this.halo(0xc59bff, 0.09);
