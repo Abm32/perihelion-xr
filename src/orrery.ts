@@ -1163,13 +1163,16 @@ export class OrrerySystem extends createSystem({
       const record = pass > 0 && (this.save.closest === 0 || pass < this.save.closest);
       if (record) this.save = { ...this.save, closest: pass };
       storeSave(this.save);
-      const stats = `${(pass * 100).toFixed(1)} cm pass at ${this.topSpeed.toFixed(2)} m/s`;
+      // An empty sky has no primary to pass, so only the speed is worth reporting.
+      const stats = pass > 0 ? `${(pass * 100).toFixed(1)} cm pass at ${this.topSpeed.toFixed(2)} m/s` : `through at ${this.topSpeed.toFixed(2)} m/s`;
       this.say(
         this.save.streak > before.streak
           ? `Daily done in ${this.save.todayShots} shots. Streak ${this.save.streak}.`
           : record
             ? `Closest pass yet: ${stats}`
-            : `Perihelion: ${stats}`,
+            : pass > 0
+              ? `Perihelion: ${stats}`
+              : `You are the gravity: ${stats}`,
       );
     } else {
       this.phase = 'miss';
