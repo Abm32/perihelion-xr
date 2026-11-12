@@ -8,6 +8,7 @@ question, and none of them replaces a person wearing one.
 | [Simulated playtest](#1-simulated-playtest) | How many shots does an imprecise person need? Is the answer forgiving? | Whether it is fun |
 | [Desktop play, mouse or webcam hands](#2-play-it-yourself) | How do the pull, slow motion, planted gravity and ghost feel? | Depth, presence, comfort, real tracking |
 | [Emulated XR hands](#3-emulated-xr-hands) | Does the real input path work end to end? | Anything about feel |
+| [Phone AR](#5-phone-ar-on-android) | Does the board land on a real desk? Does the scan cope with a real camera? Real frame rate on a real device | Hand tracking, stereo, Quest's own depth sensor |
 | [Self-measurement](#4-self-measurement-on-any-headset) | Frame rate, hand steadiness and depth noise on a real device | Nothing, until someone with a headset opens the link |
 
 ## 1. Simulated playtest
@@ -168,6 +169,30 @@ renderer, not a headset.
 The depth scan also adapts to what it measures: the height an object must clear is three times the
 measured noise (never less than 3.5 cm). In simulation with 2 cm noise, phantom objects per scan fell from
 106 in 300 to 1 in 300, and to 0 with two-scan agreement.
+
+## 5. Phone AR on Android
+
+An Android phone with Google's AR services is a real mixed-reality device that most people already own.
+Chrome on Android runs the same `immersive-ar` WebXR session as the headset, so the same build runs on it.
+
+1. Open the link in **Chrome** on the phone and tap **Play on your desk**. Allow the camera.
+2. Hold the phone about 40 cm above a desk, looking down. Move it slowly for a few seconds so the phone
+   can map the surface. The board appears in front of the camera, then settles onto the desk once the
+   surface is found (it keeps looking for about 40 seconds).
+3. **Drag the comet** back on the screen and let go. **Tap the board** to plant gravity; drag it to move it.
+4. Put a mug on the desk inside the board and wait a few seconds for the next scan.
+5. Leave AR with the back gesture. The page then shows the self-measurement line for the session.
+
+What differs from a headset: there is no hand tracking, so a finger on the screen stands in for a pinch.
+The touch becomes a ray from the camera through the finger, met with the play plane, and is then handled by
+the same code as a mouse pointer. Depth comes from the phone's camera, not Quest's sensors, and may not be
+offered at all; without it, real objects are found only where the phone maps them as surfaces, and nothing
+is occluded. If the picture misbehaves, add `?occlusion=0` to the address.
+
+**Verification status.** In the emulator, rays cast the way a screen touch produces them land on the right
+board point, drag and launch the comet, clear level 1, and plant gravity on a tap. The browser's touch
+events, the phone's surface mapping, and everything about how it looks on a real phone have not been run
+by us.
 
 ## 3. Emulated XR hands
 

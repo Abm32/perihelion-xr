@@ -159,6 +159,12 @@ export class OrrerySystem extends createSystem({
   private perf = new PerfRecorder();
   private perfShown = 0;
   private rawPrev = { x: 0, z: 0 };
+  // Phone AR: fingers on the screen, one entry per touch, keyed by its XR input source.
+  private touches = new Map<XRInputSource, { id: number; x: number; z: number }>();
+  private nextTouch = 10;
+  // No tracked hands on this device (a phone): wording and pick radius adapt.
+  private touch = navigator.maxTouchPoints > 0 && !/Quest|Oculus/.test(navigator.userAgent);
+  private scanRetries = 0;
   // One entry per generated body, in level order, so moving bodies can be re-posed each frame.
   private bodyViews: { body: Body; view: Group | Mesh; light: Vector3 | null }[] = [];
   private primary: Body | null = null;
@@ -266,6 +272,7 @@ export class OrrerySystem extends createSystem({
     this.save = openDay(loadSave(), dayNumber());
     this.loadLevel();
     this.initDesktop();
+    this.initTouch();
 
     // Debug and verification hook (emulator, tests, demo capture).
     (window as unknown as Record<string, unknown>).__perihelion = {
@@ -290,6 +297,15 @@ export class OrrerySystem extends createSystem({
       }),
       shoot: (px: number, pz: number) => this.fire(px, pz),
       pointer: (id: number, x: number, z: number, down: boolean) => this.desktopPointer(id, x, z, down),
+      // Feed a world-space ray as if a finger were on a phone screen (tests the AR touch maths).
+      ray: (id: number, o: number[], d: number[], down: boolean) => {
+        this.v1.fromArray(o);
+        this.root.worldToLocal(this.v1);
+        this.v2.fromArray(d).normalize().applyQuaternion(this.root.getWorldQuaternion(this.q1).invert());
+        if (!this.boardPoint(this.v1, this.v2)) return null;
+        this.desktopPointer(id, this.v1.x, this.v1.z, down, false);
+        return [this.v1.x, this.v1.z];
+      },
       // Board point to canvas client pixels, so a test can aim a real mouse.
       toScreen: (x: number, z: number) => {
         const rect = this.world.renderer.domElement.getBoundingClientRect();
@@ -516,11 +532,15 @@ export class OrrerySystem extends createSystem({
     this.refreshOcclusion();
     this.say(
       this.save.index === 0 && this.save.shots === 0
-        ? 'Pinch the comet. Pull back. Let go.'
+        ? this.touch
+          ? 'Drag the comet back. Let go.'
+          : 'Pinch the comet. Pull back. Let go.'
         : this.save.index >= LEVELS_PER_DAY
           ? 'Encore. A new sky tomorrow.'
           : this.level.void
-            ? 'Empty sky. Pinch the air to plant gravity.'
+            ? this.touch
+              ? 'Empty sky. Tap the board to plant gravity.'
+              : 'Empty sky. Pinch the air to plant gravity.'
             : bodies.some((b) => b.orbit)
               ? 'Time moves only while the comet flies.'
               : primary?.kind === 'hole'
@@ -690,7 +710,8 @@ export class OrrerySystem extends createSystem({
     if (!role) {
       const l = this.level.launcher;
       const cometFree = ![...this.roles.values()].includes('comet');
-      if (this.phase === 'aim' && cometFree && Math.hypot(x - l.x, z - l.z) < 0.045) {
+      // A fingertip on glass covers more than a mouse arrow, so it gets a wider catch.
+      if (this.phase === 'aim' && cometFree && Math.hypot(x - l.x, z - l.z) < (this.touch ? 0.065 : 0.045)) {
         this.roles.set(id, 'comet');
         this.phase = 'drag';
         this.lastTick = 0;
@@ -706,6 +727,71 @@ export class OrrerySystem extends createSystem({
     const now = this.roles.get(id);
     if (now === 'comet' && this.phase === 'drag') this.comet.position.set(x, PLAY_Y, z);
     if (now === 'well') this.moveWell(x, z);
+  }
+
+  // ---- phone AR: touch the screen ------------------------------------------------
+
+  /**
+   * Phones have no hand tracking. In an AR session a touch arrives as a
+   * transient input source whose ray leaves the camera through the finger.
+   */
+  private updateTouches(): void {
+    const session = this.xrManager.getSession();
+    const frame = this.xrFrame;
+    const refSpace = this.xrManager.getReferenceSpace();
+    if (!session || !frame || !refSpace) {
+      this.touches.clear();
+      return;
+    }
+    for (const [source, touch] of this.touches) {
+      const pose = frame.getPose(source.targetRaySpace, refSpace);
+      if (!pose) continue;
+      const t = pose.transform;
+      // Reference space -> world -> board space.
+      this.v1.set(t.position.x, t.position.y, t.position.z);
+      this.player.localToWorld(this.v1);
+      this.root.worldToLocal(this.v1);
+      this.q1.set(t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w);
+      this.v2.set(0, 0, -1).applyQuaternion(this.q1); // ray direction in reference space
+      this.v2.applyQuaternion(this.player.getWorldQuaternion(this.q1));
+      this.v2.applyQuaternion(this.root.getWorldQuaternion(this.q1).invert());
+      if (this.boardPoint(this.v1, this.v2)) {
+        touch.x = this.v1.x;
+        touch.z = this.v1.z;
+        this.desktopPointer(touch.id, touch.x, touch.z, true, false);
+      }
+    }
+  }
+
+  /** Meet a board-space ray with the play plane. Leaves the hit in `origin`; false if it points away. */
+  private boardPoint(origin: Vector3, dir: Vector3): boolean {
+    if (Math.abs(dir.y) < 1e-4) return false;
+    const t = (PLAY_Y - origin.y) / dir.y;
+    if (t <= 0) return false;
+    origin.addScaledVector(dir, t);
+    return true;
+  }
+
+  private initTouch(): void {
+    const onStart = (e: XRInputSourceEvent) => {
+      if (e.inputSource.targetRayMode !== 'screen') return;
+      this.touch = true;
+      resumeAudio();
+      this.touches.set(e.inputSource, { id: this.nextTouch++, x: 0, z: 9 }); // z 9: off the board until the first pose
+    };
+    const onEnd = (e: XRInputSourceEvent) => {
+      const touch = this.touches.get(e.inputSource);
+      if (!touch) return;
+      this.touches.delete(e.inputSource);
+      this.desktopPointer(touch.id, touch.x, touch.z, false, false);
+    };
+    const attach = () => {
+      const session = this.xrManager.getSession();
+      session?.addEventListener('selectstart', onStart);
+      session?.addEventListener('selectend', onEnd);
+    };
+    this.xrManager.addEventListener('sessionstart', attach);
+    this.cleanupFuncs.push(() => this.xrManager.removeEventListener('sessionstart', attach));
   }
 
   private initDesktop(): void {
@@ -761,6 +847,21 @@ export class OrrerySystem extends createSystem({
       () => window.removeEventListener('pointermove', onMove),
       () => window.removeEventListener('pointerup', onUp),
     );
+    // Portrait phones: pull the flat-view camera back until the whole board fits the width.
+    const lookAt = new Vector3(0, 0.9, -0.55);
+    const home = this.world.camera.position.clone();
+    const frameBoard = () => {
+      if (!flat()) return;
+      const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+      this.world.camera.position.copy(home).sub(lookAt).multiplyScalar(Math.max(1, 0.68 / aspect)).add(lookAt);
+      this.world.camera.lookAt(lookAt);
+    };
+    frameBoard();
+    window.addEventListener('resize', frameBoard);
+    this.cleanupFuncs.push(() => window.removeEventListener('resize', frameBoard));
+    // Stop the page scrolling or zooming under a finger that is dragging the comet.
+    canvas.style.touchAction = 'none';
+
     if (PARAMS.get('camera') === '1') {
       void startCameraHands((id, x, z, down, seen) => {
         if (flat()) this.desktopPointer(id, x, z, down, seen);
@@ -832,7 +933,13 @@ export class OrrerySystem extends createSystem({
   private applyScan(samples: DeskSample[]): void {
     this.lastScan = samples;
     const surface = deskSurface(samples);
-    if (surface === null) return; // no flat surface under the board: keep the generated level only
+    if (surface === null) {
+      // No flat surface under the board yet. On a phone the desk is often not
+      // mapped until the camera has moved a little, so keep looking for a while.
+      if (this.scanRetries++ < 20) this.scanIn = 2;
+      return;
+    }
+    this.scanRetries = 0;
     // Depth-based height is live; it corrects a missing or stale plane.
     this.root.position.y += surface + 0.004;
     const before = this.desk.length;
@@ -953,6 +1060,7 @@ export class OrrerySystem extends createSystem({
       this.v1.z + this.v2.z * 0.45,
     );
     this.root.rotation.y = Math.atan2(-this.v2.x, -this.v2.z);
+    this.scanRetries = 0;
     this.snapWindow = 8; // planes often arrive a few seconds into the session
     this.snapToDesk();
     this.scanIn = 1.2; // then look at what is really on the desk
@@ -1161,6 +1269,7 @@ export class OrrerySystem extends createSystem({
     }
 
     this.updateWell();
+    this.updateTouches();
 
     if (this.dropComet) {
       this.dropComet = false;

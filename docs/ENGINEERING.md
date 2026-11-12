@@ -43,6 +43,7 @@ was verified in the IWSDK browser emulator (Quest 3 profile, emulated hands, syn
 | 32 | [Three numbers we could not measure](#32-three-numbers-we-could-not-measure) | The app measures itself and prints a report |
 | 33 | [Our hand-error figure was optimistic](#33-our-hand-error-figure-was-optimistic) | Re-ran the playtest at published error; smoothed the well |
 | 34 | [Depth noise was a guess](#34-depth-noise-was-a-guess) | The scan measures noise and sets its own threshold |
+| 35 | [The only real device was a phone](#35-the-only-real-device-was-a-phone) | Touch input for the AR session |
 
 ---
 
@@ -484,6 +485,28 @@ player's device. The threshold is now three times that, never below 3.5 cm and n
 
 **Verified.** With simulated 2 cm noise the estimate read 19 mm, phantoms per scan fell from 106 in 300
 (fixed threshold) to 1 in 300, and to 0 with two-scan agreement. The measured noise goes into the report.
+
+## 35. The only real device was a phone
+
+**Problem.** Every mixed-reality feature had run only against the emulator's synthetic room. The one real
+AR device available was an Android phone, and on it the game opened in AR and could not be played: phones
+have no hand tracking, and all in-session input was hand pinches.
+
+**What we did.** In an AR session a finger on the screen arrives as a transient WebXR input source whose
+ray leaves the camera through the touch point. `OrrerySystem` listens for those (`targetRayMode ===
+'screen'`), meets each ray with the play plane, and passes the board point to the same pointer handler the
+mouse uses: on the comet it draws it back, elsewhere it plants gravity. The catch radius is wider for a
+fingertip, and the wording changes from "pinch" to "drag" and "tap".
+
+Two things changed for phones' benefit and help headsets too. The desk scan now retries every two seconds
+while it finds no flat surface, because a phone maps a desk only after the camera has moved. And the flat
+page pulls its camera back in portrait so the board fits, and stops the page scrolling under a dragging
+finger.
+
+**Verified.** In the emulator's XR session, synthetic screen rays hit the right board point (within
+2 mm), dragged and launched the comet, cleared level 1 and planted gravity with a tap.
+**Unproven.** The touch events themselves, surface mapping, depth availability and appearance on a real
+phone. The first phone session is the test.
 
 ---
 
