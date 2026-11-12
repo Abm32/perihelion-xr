@@ -40,6 +40,9 @@ was verified in the IWSDK browser emulator (Quest 3 profile, emulated hands, syn
 | 29 | [No human had ever played it](#29-no-human-had-ever-played-it) | Mouse, webcam hands and live tuning in the browser |
 | 30 | [Depth noise invented desk objects](#30-depth-noise-invented-desk-objects) | Two adjacent probes, two agreeing scans |
 | 31 | [Is the scene within Quest's budget?](#31-is-the-scene-within-quests-budget) | Counted draw calls and triangles |
+| 32 | [Three numbers we could not measure](#32-three-numbers-we-could-not-measure) | The app measures itself and prints a report |
+| 33 | [Our hand-error figure was optimistic](#33-our-hand-error-figure-was-optimistic) | Re-ran the playtest at published error; smoothed the well |
+| 34 | [Depth noise was a guess](#34-depth-noise-was-a-guess) | The scan measures noise and sets its own threshold |
 
 ---
 
@@ -435,6 +438,53 @@ the mug still found in 299 of 300.
 **Unproven.** Fragment cost (noise shaders, occlusion taps) is not in those counters. The governor in
 [#24](#24-no-way-to-measure-frame-rate) remains the safeguard for that.
 
+## 32. Three numbers we could not measure
+
+**Problem.** Frame rate, real hand steadiness and real depth noise all need a headset. We looked for a way
+around that. Meta's guidance is plain: frame timing has to come from an immersive session on the device
+(OVR Metrics Tool, or tracing through `chrome://inspect`). A desktop tab renders at the monitor's rate and
+says nothing about a Quest.
+
+**What we did.** Since we cannot bring a headset to the build, the build carries the instrument to the
+headset. `src/perf.ts` records every frame of an immersive session, the cost of our own update, the
+governor's state, the player's hand wobble and release jump, and the depth noise the desk scan sees. On
+leaving the session it saves a report and prints one line on the page. One screenshot from any tester,
+or from a judge's own session, is a measurement. `?perf=1` shows live frame rate in the HUD.
+
+For today, Chrome's CPU throttle gave a bound on script cost: 0.10 ms per update, 0.41 ms at 6x slowdown,
+against a 13.9 ms frame at 72 Hz. The one spike is level generation (43 ms at 6x), which lands between
+levels.
+
+**Verified.** Emulator session produced and displayed the report line. **Unproven:** every number in it
+until a real device runs it. GPU fill cost in particular is still unmeasured.
+
+## 33. Our hand-error figure was optimistic
+
+**Problem.** The simulated playtest assumed 5 mm of hand error. Published measurements are larger: about
+1.1 cm average fingertip error on Quest 2 and 1.73 cm on Quest 3, with knuckles steadier than fingertips.
+
+**What we found.** Those are absolute errors against a motion-capture ground truth. In this game the
+player aims by looking at the rendered comet, so a constant offset between real and tracked hand does not
+matter; wobble and the release jump do, and neither study reports those separately. So we re-ran the
+playtest with the full published error treated as random, which overstates it. Level 1 stayed a one- or
+two-shot win and level 3 about four shots.
+
+**What we changed.** A planted well follows the fingertip, the noisiest point, so it now trails it with a
+short lag. The comet already moves with the grab pose and launches from an 80 ms smoothed pull. And the
+recorder in #32 measures real wobble and release jump whenever a device runs the game.
+
+## 34. Depth noise was a guess
+
+**Problem.** We searched for a published accuracy figure for the Quest 3 Depth API and found none, only
+Meta's qualitative limits. The 3.5 cm object threshold rested on an assumed 1.2 cm of noise.
+
+**What we did.** The desk scan already samples 85 points of a surface that should be flat. The spread of
+those heights around the fitted surface *is* the depth noise, measured in the player's room on the
+player's device. The threshold is now three times that, never below 3.5 cm and never above 8 cm.
+
+**Verified.** With simulated 2 cm noise the estimate read 19 mm, phantoms per scan fell from 106 in 300
+(fixed threshold) to 1 in 300, and to 0 with two-scan agreement. The measured noise goes into the report.
+
 ---
 
 ## Open risks
@@ -443,7 +493,7 @@ Only a headset can close these.
 
 | Risk | Why it is open | Escape hatch |
 |---|---|---|
-| Frame rate under 60 fps | Never profiled on device. The governor (#24) sheds occlusion cost automatically, but the noise shaders and the grid are fixed costs | `?occlusion=hard` (1 tap) or `?occlusion=0` |
+| Frame rate under 60 fps | Never profiled on device; the app now reports it after any session (#32). The governor (#24) sheds occlusion cost automatically, but the noise shaders and the grid are fixed costs | `?occlusion=hard` (1 tap) or `?occlusion=0` |
 | Slow motion feels sluggish | Tuned without playing it | `timeScale` floor (0.3) in `OrrerySystem.update` |
 | Depth noise creates phantom objects | Emulator depth is clean | Thresholds in `src/sim.ts`; `?desk=0` |
 | Too many hit-test sources | Browser limit unknown | `BATCH` in `src/desk.ts` |

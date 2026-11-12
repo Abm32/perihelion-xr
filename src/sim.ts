@@ -449,7 +449,7 @@ export interface DeskSample {
 }
 
 export const DESK_STEP = 0.045; // probe grid spacing
-const OBJECT_MIN_H = 0.035; // about three sigma of the depth noise we plan for (1.2 cm)
+export const OBJECT_MIN_H = 0.035; // about three sigma of the depth noise we plan for (1.2 cm)
 const OBJECT_MIN_PROBES = 2; // one tall probe is an outlier, never an object
 
 /** Hex grid of probe points covering the board. */
@@ -487,9 +487,25 @@ export function deskSurface(samples: DeskSample[]): number | null {
   return flat.reduce((a, h) => a + h, 0) / flat.length;
 }
 
+/**
+ * Depth noise as the desk itself shows it: the spread of probe heights around
+ * the fitted surface, in meters. Probes more than 5 cm off are objects or
+ * outliers, not noise, and are left out.
+ */
+export function deskNoise(samples: DeskSample[], surface: number): number {
+  const res = samples.map((s) => s.h - surface).filter((d) => Math.abs(d) < 0.05);
+  if (res.length < 8) return 0;
+  return Math.sqrt(res.reduce((a, d) => a + d * d, 0) / res.length);
+}
+
+/** Height a probe must clear to count as an object: three sigma of the measured noise, at least 3.5 cm. */
+export function objectThreshold(noise: number): number {
+  return Math.min(0.08, Math.max(OBJECT_MIN_H, noise * 3));
+}
+
 /** Group probes that stand clear of the surface into at most three round bodies. */
-export function clusterDesk(samples: DeskSample[], surface: number): Body[] {
-  const tall = samples.filter((s) => s.h - surface > OBJECT_MIN_H && s.h - surface < 0.4);
+export function clusterDesk(samples: DeskSample[], surface: number, minHeight = OBJECT_MIN_H): Body[] {
+  const tall = samples.filter((s) => s.h - surface > minHeight && s.h - surface < 0.4);
   const seen = new Set<DeskSample>();
   const bodies: (Body & { n: number })[] = [];
   for (const seed of tall) {

@@ -7,6 +7,8 @@ import {
   plantedWell,
   clusterDesk,
   confirmDesk,
+  deskNoise,
+  objectThreshold,
   deskProbePoints,
   deskSurface,
   launch,
@@ -139,6 +141,36 @@ assert.ok(holes >= 10, `only ${holes} black holes in 120 levels`);
   assert.ok(phantom <= 45, `single-scan phantoms: ${phantom}/300`);
   assert.ok(phantom2 <= 3, `phantom objects survive two-scan agreement: ${phantom2}/300`);
   assert.ok(found2 >= 285, `mug lost by two-scan agreement: ${found2}/300`);
+}
+
+// Noisier depth than planned for (2 cm): the scan measures the noise and raises its own bar.
+{
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-9)) * Math.cos(2 * Math.PI * rnd());
+  const pts = deskProbePoints();
+  let fixed = 0;
+  let adaptive = 0;
+  let agreed = 0;
+  let measured = 0;
+  let prev = [];
+  for (let trial = 0; trial < 300; trial++) {
+    const scan = pts.map((p) => ({ ...p, h: gauss() * 0.02 }));
+    const surface = deskSurface(scan);
+    if (surface === null) continue;
+    const noise = deskNoise(scan, surface);
+    measured += noise;
+    if (clusterDesk(scan, surface).length) fixed++;
+    const found = clusterDesk(scan, surface, objectThreshold(noise));
+    if (found.length) adaptive++;
+    if (confirmDesk(prev, found).length) agreed++;
+    prev = found;
+  }
+  console.log(`2 cm depth noise: measured ${(measured / 300 * 1000).toFixed(1)} mm; phantoms fixed bar ${fixed}/300, adaptive bar ${adaptive}/300, adaptive + agreement ${agreed}/300`);
+  assert.ok(Math.abs(measured / 300 - 0.02) < 0.004, 'noise estimate is close to the truth');
+  assert.ok(adaptive < fixed / 3, 'adaptive bar removes most phantoms');
+  assert.ok(agreed <= 2, `phantoms survive adaptive bar and agreement: ${agreed}/300`);
+  assert.equal(objectThreshold(0.005), 0.035, 'quiet depth keeps the 3.5 cm floor');
 }
 
 // Streak: finish day 10, finish day 11, skip 12, open 13.
